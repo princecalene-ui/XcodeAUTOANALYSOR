@@ -138,6 +138,19 @@ def init_db():
         status TEXT,
         error TEXT
     );
+    CREATE TABLE IF NOT EXISTS predictions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, target_n INTEGER UNIQUE NOT NULL,
+        created_at TEXT NOT NULL, prediction_suit TEXT NOT NULL, strategy TEXT,
+        confidence REAL DEFAULT 0, hit_rate REAL DEFAULT 0, margin REAL DEFAULT 0,
+        basis_n INTEGER, basis_first_suit TEXT, status TEXT DEFAULT 'PENDING',
+        actual_first_suit TEXT, validated_at TEXT, note TEXT
+    );
+    CREATE TABLE IF NOT EXISTS pattern_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, pattern TEXT UNIQUE NOT NULL,
+        occurrences INTEGER DEFAULT 0, last_seen_n INTEGER, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_predictions_target ON predictions(target_n);
+    CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
     """)
     conn.commit()
     conn.close()
@@ -198,6 +211,42 @@ def get_all_hands():
     rows = conn.execute("SELECT * FROM hands ORDER BY n ASC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None):
+    if not prediction: return
+    conn=get_conn()
+    conn.execute("""INSERT INTO predictions
+      (target_n,created_at,prediction_suit,strategy,confidence,hit_rate,margin,basis_n,basis_first_suit)
+      VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(target_n) DO UPDATE SET
+      prediction_suit=excluded.prediction_suit,strategy=excluded.strategy,confidence=excluded.confidence,
+      hit_rate=excluded.hit_rate,margin=excluded.margin,basis_n=excluded.basis_n,basis_first_suit=excluded.basis_first_suit
+    """,(target_n,datetime.utcnow().isoformat(),prediction['suit'],prediction.get('strategy'),prediction.get('confidence',0),prediction.get('hit_rate',0),prediction.get('margin',0),basis_n,basis_first_suit))
+    conn.commit(); conn.close()
+
+def validate_predictions():
+    conn=get_conn(); rows=conn.execute("""SELECT p.id,p.target_n,p.prediction_suit,h.player_first_suit
+      FROM predictions p JOIN hands h ON h.n=p.target_n WHERE p.status='PENDING'""").fetchall()
+    for r in rows:
+        status='VALID' if r['player_first_suit']==r['prediction_suit'] else 'INVALID'
+        conn.execute("UPDATE predictions SET status=?,actual_first_suit=?,validated_at=? WHERE id=?",(status,r['player_first_suit'],datetime.utcnow().isoformat(),r['id']))
+    conn.commit(); conn.close()
+
+def get_prediction_history(limit=100):
+    conn=get_conn(); rows=conn.execute("SELECT * FROM predictions ORDER BY target_n DESC LIMIT ?",(int(limit),)).fetchall(); conn.close(); return [dict(r) for r in rows]
+
+def record_patterns(hands):
+    if len(hands)<3: return
+    conn=get_conn(); now=datetime.utcnow().isoformat()
+    for i in range(2,len(hands)):
+        vals=[hands[j].get('player_first_suit') for j in (i-2,i-1,i)]
+        if not all(vals): continue
+        pattern='P:'+'>'.join(vals)
+        conn.execute("""INSERT INTO pattern_observations(pattern,occurrences,last_seen_n,updated_at) VALUES(?,?,?,?)
+          ON CONFLICT(pattern) DO UPDATE SET occurrences=occurrences+1,last_seen_n=excluded.last_seen_n,updated_at=excluded.updated_at""",(pattern,1,hands[i]['n'],now))
+    conn.commit(); conn.close()
+
+def get_patterns(limit=20):
+    conn=get_conn(); rows=conn.execute("SELECT pattern,occurrences,last_seen_n FROM pattern_observations ORDER BY occurrences DESC,last_seen_n DESC LIMIT ?",(int(limit),)).fetchall(); conn.close(); return [dict(r) for r in rows]
 
 # -------------------------------------------------
 # Collector
@@ -387,44 +436,22 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         elif path == "/api/live":
-            hands = get_all_hands()
-            report = analyze(hands)
-            latest = hands[-1] if hands else None
-            live = {
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "latest": latest,
-                "prediction": None,
-                "strategy": None,
-                "margin": None,
-            }
+            hands=get_all_hands(); report=analyze(hands); latest=hands[-1] if hands else None; prediction=None
             if latest and report.get("strategies"):
-                applicable = [
-                    x for x in report["strategies"]
-                    if x["side"] == "player"
-                    and x["from"] == latest.get("player_first_suit")
-                ]
-                if not applicable:
-                    applicable = [
-                        x for x in report["strategies"]
-                        if x["side"] == "banker"
-                        and x["from"] == latest.get("banker_first_suit")
-                    ]
+                applicable=[x for x in report["strategies"] if x["side"]=="player" and x["from"]==latest.get("player_first_suit")]
+                if not applicable: applicable=[x for x in report["strategies"] if x["side"]=="banker" and x["from"]==latest.get("banker_first_suit")]
                 if applicable:
-                    applicable.sort(
-                        key=lambda x: (x["confidence"], x["hit_rate"], x["sample"]),
-                        reverse=True
-                    )
-                    best = applicable[0]
-                    live["prediction"] = {
-                        "suit": best["to"],
-                        "symbol": EMOJI[best["to"]],
-                        "hit_rate": best["hit_rate"],
-                        "confidence": best["confidence"],
-                        "sample": best["sample"],
-                    }
-                    live["strategy"] = best["name"]
-                    live["margin"] = round(best["hit_rate"] - 25.0, 2)
-            self.send_json(live)
+                    best=max(applicable,key=lambda x:(x["confidence"],x["hit_rate"],x["sample"]))
+                    prediction={"suit":best["to"],"symbol":EMOJI[best["to"]],"hit_rate":best["hit_rate"],"confidence":best["confidence"],"sample":best["sample"],"margin":round(best["hit_rate"]-25,2),"strategy":best["name"]}
+                    upsert_prediction(latest["n"]+1,prediction,latest["n"],latest.get("player_first_suit"))
+            validate_predictions(); record_patterns(hands)
+            self.send_json({"timestamp":datetime.now().isoformat(timespec="seconds"),"latest":latest,"prediction":prediction,"prediction_target_n":latest["n"]+1 if latest else None,"prediction_history":get_prediction_history(100),"patterns":get_patterns(15),"timing":{"game_minutes":60,"mode":"consecutive_next_game"}})
+
+        elif path == "/api/predictions":
+            validate_predictions(); self.send_json(get_prediction_history(int(qs.get("limit",[100])[0])))
+
+        elif path == "/api/patterns":
+            self.send_json(get_patterns(int(qs.get("limit",[30])[0])))
 
         elif path == "/api/hands":
             limit = int(qs.get("limit", [50])[0])
@@ -452,6 +479,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 parsed = collect(pages=pages)
                 new = upsert_hands(parsed)
+                hands_now = get_all_hands()
+                record_patterns(hands_now)
+                validate_predictions()
                 conn = get_conn()
                 conn.execute(
                     "INSERT INTO collection_logs "
@@ -471,101 +501,15 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "Not found"}, 404)
 
-DASHBOARD = """<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Xcode Suit Card — Live Strategy</title>
-<style>
-:root{--bg:#07111f;--panel:#0d1b2d;--line:#1d3552;--text:#f4f7fb;--muted:#8fa6bf;--accent:#4f8cff;--ok:#34d399;--warn:#fbbf24;--shadow:0 18px 50px rgba(0,0,0,.25)}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0%,#102b49 0,#07111f 42%,#050b14 100%);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
-.shell{max-width:1280px;margin:auto;padding:26px}.top{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:22px}
-.brand{display:flex;align-items:center;gap:14px}.logo{width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,#4f8cff,#7c5cff);display:grid;place-items:center;font-size:25px;box-shadow:0 10px 30px rgba(79,140,255,.28)}
-h1{font-size:clamp(1.35rem,3vw,2rem);margin:0;letter-spacing:-.03em}.sub{color:var(--muted);margin:4px 0 0;font-size:.9rem}
-.live-pill{display:flex;align-items:center;gap:8px;border:1px solid #1e4b43;background:#0b2724;color:#8ff0d0;padding:8px 12px;border-radius:999px;font-size:.78rem;font-weight:700}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 14px var(--ok);animation:pulse 1.5s infinite}@keyframes pulse{50%{opacity:.35;transform:scale(.75)}}
-.hero{display:grid;grid-template-columns:1.45fr .85fr;gap:18px;margin-bottom:18px}.panel{background:linear-gradient(180deg,rgba(16,36,59,.96),rgba(9,23,39,.96));border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);overflow:hidden}
-.panel-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--line)}.panel-title{font-weight:800;font-size:.96rem}.eyebrow{color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.12em}
-.live-main{padding:24px 20px;display:grid;grid-template-columns:1fr 1fr;gap:18px}.game-box,.prediction-box{border:1px solid var(--line);border-radius:16px;padding:18px;background:rgba(4,13,24,.35)}
-.label{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px}.game-number{font-size:2rem;font-weight:900}.cards{display:flex;gap:9px;flex-wrap:wrap;margin-top:13px}
-.card-chip{min-width:56px;height:70px;border-radius:12px;background:#f8fafc;color:#101827;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;box-shadow:0 7px 18px rgba(0,0,0,.25)}.card-chip small{font-size:1.1rem}.red{color:#e11d48}.black{color:#111827}
-.pred{display:flex;align-items:center;gap:15px}.suit{font-size:4.2rem;line-height:1}.pred-name{font-size:1.5rem;font-weight:900}.metric{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.metric div{background:#091625;border-radius:12px;padding:11px}.metric b{display:block;font-size:1.15rem;margin-top:3px}.metric span{font-size:.68rem;color:var(--muted);text-transform:uppercase}.margin{color:var(--ok)!important}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}.stat{padding:18px 20px}.stat .value{font-size:1.55rem;font-weight:900;margin-top:5px}.stat .small{font-size:.74rem;color:var(--muted)}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.actions{display:flex;gap:9px;flex-wrap:wrap;padding:16px 20px}
-button{border:0;border-radius:10px;padding:10px 14px;color:white;background:var(--accent);font-weight:750;cursor:pointer}button.sec{background:#1a304a;border:1px solid var(--line)}button:hover{filter:brightness(1.12)}
-.table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse;font-size:.84rem}.table th,.table td{text-align:left;padding:12px 14px;border-bottom:1px solid #172d45}.table th{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
-.badge{padding:4px 8px;border-radius:999px;background:#142e49;color:#bcd7f7;font-weight:700;font-size:.7rem}.out{padding:18px 20px;min-height:100px;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem;color:#b8c9dc}
-.foot{color:#68809b;font-size:.73rem;text-align:center;padding:24px 0}@media(max-width:900px){.hero,.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}@media(max-width:560px){.shell{padding:14px}.live-main{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.top{align-items:flex-start}.live-pill{font-size:.68rem}}
-</style>
-</head>
-<body>
-<div class="shell">
-<header class="top"><div class="brand"><div class="logo">♠</div><div><h1>Xcode Suit Card</h1><p class="sub">Console de stratégie — analyse historique + lecture du jeu courant</p></div></div><div class="live-pill"><span class="dot"></span> LIVE • actualisation automatique</div></header>
-
-<section class="hero">
-<div class="panel">
-<div class="panel-head"><div><div class="eyebrow">Flux actuel</div><div class="panel-title">Jeu le plus récent détecté</div></div><span id="liveTime" class="badge">--:--:--</span></div>
-<div class="live-main">
-<div class="game-box"><div class="label">Main / manche</div><div id="gameNo" class="game-number">—</div><div class="cards" id="playerCards"><span class="badge">Chargement…</span></div><div class="label" style="margin-top:17px">Player</div></div>
-<div class="game-box"><div class="label">Cartes Banker</div><div class="cards" id="bankerCards"><span class="badge">—</span></div><div class="label" style="margin-top:17px">Banker</div></div>
-</div></div>
-
-<div class="panel"><div class="panel-head"><div><div class="eyebrow">Stratégie active</div><div class="panel-title">Marge de prédiction</div></div><span id="strategyBadge" class="badge">En attente</span></div>
-<div style="padding:24px 20px"><div class="pred"><div id="predSuit" class="suit">—</div><div><div class="label">Enseigne projetée</div><div id="predName" class="pred-name">Aucune donnée</div></div></div>
-<div class="metric"><div><span>Taux historique</span><b id="hitRate">—</b></div><div><span>Marge vs 25%</span><b id="margin" class="margin">—</b></div><div><span>Échantillon</span><b id="sample">—</b></div><div><span>Confiance</span><b id="confidence">—</b></div></div></div></div>
-</section>
-
-<section class="stats">
-<div class="panel stat"><div class="eyebrow">Mains en base</div><div id="total" class="value">{total_hands}</div><div class="small">données collectées</div></div>
-<div class="panel stat"><div class="eyebrow">Plus ancien</div><div id="oldest" class="value">{oldest_n}</div><div class="small">numéro de jeu</div></div>
-<div class="panel stat"><div class="eyebrow">Plus récent</div><div id="latest" class="value">{latest_n}</div><div class="small">numéro de jeu</div></div>
-<div class="panel stat"><div class="eyebrow">Stratégies</div><div id="stratCount" class="value">—</div><div class="small">détectées automatiquement</div></div>
-</section>
-
-<div class="grid">
-<section class="panel"><div class="panel-head"><div><div class="eyebrow">Contrôle</div><div class="panel-title">Collecte & analyse</div></div></div>
-<div class="actions"><button onclick="go(10)">Collecter 10 pages</button><button class="sec" onclick="go(25)">Historique 25 pages</button><button class="sec" onclick="analyse()">Analyse complète</button><button class="sec" onclick="strats()">Stratégies</button></div>
-<div id="out" class="out">Système prêt. La vue LIVE se met à jour automatiquement.</div></section>
-
-<section class="panel"><div class="panel-head"><div><div class="eyebrow">Historique immédiat</div><div class="panel-title">Derniers jeux</div></div></div>
-<div class="table-wrap"><table class="table"><thead><tr><th>#N</th><th>Player</th><th>Banker</th><th>P1</th><th>B1</th></tr></thead><tbody id="recent"><tr><td colspan="5">Chargement…</td></tr></tbody></table></div></section>
-</div>
-<div class="foot">Xcode SUIT CARD STRATÉGIE CREATOR · Les taux affichés sont historiques et ne garantissent pas le résultat d'un jeu futur.</div>
-</div>
-
-<script>
-const suitMap={H:'♥',D:'♦',S:'♠',C:'♣'}, redSuit=s=>s==='H'||s==='D';
-function cardHtml(rank,suit){return `<div class="card-chip ${redSuit(suit)?'red':'black'}"><strong>${rank}</strong><small>${suitMap[suit]||suit}</small></div>`}
-function setText(id,v){document.getElementById(id).textContent=v??'—'}
-async function refreshLive(){
- try{
-  const d=await(await fetch('/api/live',{cache:'no-store'})).json(),h=d.latest;
-  setText('liveTime',new Date().toLocaleTimeString());
-  if(h){
-   setText('gameNo','#N'+h.n);setText('latest',h.n);
-   document.getElementById('playerCards').innerHTML=(h.player_suits||'').split(',').map((s,i)=>s?cardHtml('P'+(i+1),s):'').join('');
-   document.getElementById('bankerCards').innerHTML=(h.banker_suits||'').split(',').map((s,i)=>s?cardHtml('B'+(i+1),s):'').join('');
-  }
-  if(d.prediction){
-   setText('predSuit',d.prediction.symbol);setText('predName',d.prediction.symbol+' — enseigne proposée');
-   setText('hitRate',d.prediction.hit_rate+'%');setText('margin',(d.margin>=0?'+':'')+d.margin+' pts');
-   setText('sample',d.prediction.sample);setText('confidence',Math.round(d.prediction.confidence*100)+'%');setText('strategyBadge',d.strategy);
-  }else{['predSuit','predName','hitRate','margin','sample','confidence'].forEach(id=>setText(id,'—'));setText('strategyBadge','En attente')}
-  const rows=await(await fetch('/api/hands?limit=8',{cache:'no-store'})).json();
-  document.getElementById('recent').innerHTML=rows.map(r=>`<tr><td><b>#${r.n}</b></td><td>${r.player_suits||'—'}</td><td>${r.banker_suits||'—'}</td><td><span class="badge">${suitMap[r.player_first_suit]||'—'}</span></td><td><span class="badge">${suitMap[r.banker_first_suit]||'—'}</span></td></tr>`).join('');
- }catch(e){console.error(e)}
-}
-async function refreshStats(){try{const ov=await(await fetch('/api/stats/overview',{cache:'no-store'})).json();setText('total',ov.total_hands);setText('oldest',ov.oldest_n||'—');setText('latest',ov.latest_n||'—');const st=await(await fetch('/api/analysis/strategies',{cache:'no-store'})).json();setText('stratCount',st.count)}catch(e){}}
-async function go(pages){const el=document.getElementById('out');el.textContent='Collecte en cours…';try{const d=await(await fetch('/api/collect?pages='+pages,{method:'POST'})).json();el.textContent=JSON.stringify(d,null,2);await refreshStats();await refreshLive()}catch(e){el.textContent='Erreur : '+e}}
-async function analyse(){const el=document.getElementById('out');el.textContent='Analyse en cours…';try{const d=await(await fetch('/api/analysis/full')).json();el.textContent=JSON.stringify(d,null,2)}catch(e){el.textContent='Erreur : '+e}}
-async function strats(){const el=document.getElementById('out');el.textContent='Chargement des stratégies…';try{const d=await(await fetch('/api/analysis/strategies')).json();el.textContent=JSON.stringify(d,null,2)}catch(e){el.textContent='Erreur : '+e}}
-refreshStats();refreshLive();setInterval(refreshLive,3000);setInterval(refreshStats,10000);
-</script>
-</body>
-</html>
-""".replace("{port}", str(PORT))
+DASHBOARD = """<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Xcode Suit Card — Live</title><style>
+:root{--bg:#050b14;--p:#0d1c2e;--p2:#091625;--l:#213b58;--t:#f4f7fb;--m:#8fa7bf;--b:#4f8cff;--g:#22d39b;--r:#ff5876;--y:#f6c653}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#143452,#050b14 42%);color:var(--t);font-family:Inter,system-ui,sans-serif}.shell{max-width:1400px;margin:auto;padding:22px}.top,.head,.row{display:flex;align-items:center;justify-content:space-between;gap:12px}.top{margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.logo{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#4f8cff,#7b5cff);font-size:25px}h1{margin:0;font-size:clamp(1.3rem,3vw,2rem)}.sub{margin:4px 0 0;color:var(--m);font-size:.8rem}.live,.pill{border-radius:999px;padding:7px 10px;font-size:.68rem;font-weight:850}.live{color:#8ef0d3;background:#08231f;border:1px solid #1c4c42}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--g);margin-right:6px}.hero,.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:15px}.panel{background:linear-gradient(180deg,#10243a,#091725);border:1px solid var(--l);border-radius:18px;overflow:hidden;box-shadow:0 16px 45px #0005}.head{padding:15px 18px;border-bottom:1px solid var(--l)}.ey{color:var(--m);font-size:.62rem;text-transform:uppercase;letter-spacing:.13em}.title{font-weight:850;margin-top:3px}.body{padding:18px}.livegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.box{background:#06111d88;border:1px solid var(--l);border-radius:14px;padding:15px}.num{font-size:1.9rem;font-weight:950;margin:4px 0 12px}.cards{display:flex;gap:7px;flex-wrap:wrap}.card{width:53px;height:66px;border-radius:10px;background:#f8fafc;color:#101827;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900}.card small{font-size:1.1rem}.red{color:#e11d48}.pred{display:flex;align-items:center;gap:13px}.suit{font-size:4.2rem}.pname{font-size:1.35rem;font-weight:950}.metrics,.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.metrics{margin-top:16px}.metric,.stat{background:var(--p2);border-radius:11px;padding:10px}.metric span,.small{display:block;color:var(--m);font-size:.61rem;text-transform:uppercase}.metric b{font-size:1.02rem}.green{color:var(--g)}.yellow{color:var(--y)}.stats{grid-template-columns:repeat(5,1fr);margin:15px 0}.stat{padding:15px}.val{font-size:1.3rem;font-weight:950;margin-top:4px}.grid{margin-top:15px}.tablewrap{max-height:480px;overflow:auto}.table{width:100%;border-collapse:collapse;font-size:.75rem}.table th,.table td{padding:9px 11px;border-bottom:1px solid #193149;text-align:left;white-space:nowrap}.table th{position:sticky;top:0;background:#0d2034;color:var(--m);font-size:.6rem}.status{padding:4px 7px;border-radius:999px;font-weight:900}.valid{background:#21d39b22;color:#67efc2}.invalid{background:#ff587622;color:#ff8aa0}.pending{background:#f6c65322;color:#ffd976}.actions{display:flex;gap:8px;flex-wrap:wrap;padding:14px 18px}button{border:0;border-radius:9px;padding:9px 12px;color:#fff;background:var(--b);font-weight:800}button.alt{background:#17334f;border:1px solid var(--l)}.patterns{padding:8px 18px 15px}.pattern{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #193149}.count{color:var(--y);font-weight:900}.out{padding:14px 18px;min-height:80px;color:#b9c9da;font:11px ui-monospace,monospace;white-space:pre-wrap}.foot{text-align:center;color:#637c96;font-size:.67rem;padding:18px}@media(max-width:900px){.hero,.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.shell{padding:12px}.top{align-items:flex-start}.livegrid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.stats .stat:last-child{grid-column:1/-1}}
+</style></head><body><div class="shell"><header class="top"><div class="brand"><div class="logo">♠</div><div><h1>Xcode Suit Card</h1><div class="sub">Moteur séquentiel • stratégie adaptative • mémoire serveur</div></div></div><div class="live"><span class="dot"></span>LIVE • 3s</div></header>
+<section class="hero"><div class="panel"><div class="head"><div><div class="ey">Flux TG</div><div class="title">Jeu actuel / dernier jeu reçu</div></div><span id="clock" class="pill">—</span></div><div class="body"><div class="livegrid"><div class="box"><div class="ey">PLAYER</div><div id="gn" class="num">—</div><div id="pc" class="cards">—</div></div><div class="box"><div class="ey">BANKER</div><div id="bc" class="cards">—</div><div style="margin-top:14px" class="ey">Cadence</div><b>1 jeu = 60 min</b></div></div></div></div>
+<div class="panel"><div class="head"><div><div class="ey">Décision automatique</div><div class="title">Prochain jeu</div></div><span id="strat" class="pill">AUTO</span></div><div class="body"><div class="pred"><div id="ps" class="suit">—</div><div><div class="ey">Enseigne du joueur</div><div id="pn" class="pname">En attente</div><span id="target" class="pill">Cible —</span></div></div><div class="metrics"><div class="metric"><span>Taux historique</span><b id="rate">—</b></div><div class="metric"><span>Marge vs 25%</span><b id="margin" class="green">—</b></div><div class="metric"><span>Échantillon</span><b id="sample">—</b></div><div class="metric"><span>Confiance</span><b id="conf">—</b></div></div></div></div></section>
+<section class="stats"><div class="panel stat"><span class="ey">Jeux</span><div id="total" class="val">—</div><div class="small">serveur</div></div><div class="panel stat"><span class="ey">Prédictions</span><div id="preds" class="val">—</div><div class="small">historique</div></div><div class="panel stat"><span class="ey">Validées</span><div id="valid" class="val">—</div><div class="small">vert</div></div><div class="panel stat"><span class="ey">Non validées</span><div id="invalid" class="val">—</div><div class="small">rouge</div></div><div class="panel stat"><span class="ey">Schémas</span><div id="pcount" class="val">—</div><div class="small">récurrents</div></div></section>
+<div class="grid"><section class="panel"><div class="head"><div><div class="ey">Mémoire serveur</div><div class="title">Historique de toutes les prédictions</div></div><button onclick="copyPred()">Copier</button></div><div class="tablewrap"><table class="table"><thead><tr><th>Jeu</th><th>Préd.</th><th>Stratégie</th><th>Taux</th><th>Marge</th><th>Statut</th><th>Réel</th></tr></thead><tbody id="hist"><tr><td colspan="7">Chargement…</td></tr></tbody></table></div></section>
+<section class="panel"><div class="head"><div><div class="ey">Exploration</div><div class="title">Schémas fréquemment répétés</div></div><span class="pill">AUTO</span></div><div id="patterns" class="patterns">Analyse…</div><div class="head"><div><div class="ey">Recalibrage</div><div class="title">Nouvelle collecte → nouvelle stratégie</div></div></div><div class="actions"><button onclick="collect(10)">Collecter 10</button><button class="alt" onclick="collect(25)">Collecter 25</button><button class="alt" onclick="full()">Analyse complète</button><button class="alt" onclick="refreshAll()">Actualiser</button></div><div id="out" class="out">La prédiction suivante est enregistrée côté serveur et validée dès que le jeu cible apparaît dans le flux.</div></section></div><div class="foot">Aucune prédiction n'est stockée dans localStorage. Les prédictions, validations et schémas sont enregistrés dans la base serveur. Les taux sont historiques et ne garantissent pas un résultat futur.</div></div>
+<script>const sm={H:'♥',D:'♦',S:'♠',C:'♣'},red=s=>s==='H'||s==='D';const tx=(id,v)=>document.getElementById(id).textContent=v??'—';const card=(r,s)=>`<div class="card ${red(s)?'red':'black'}"><strong>${r}</strong><small>${sm[s]||s}</small></div>`;async function j(u,o){return(await fetch(u,o)).json()}async function refreshAll(){try{const [l,h,p,st]=await Promise.all([j('/api/live'),j('/api/predictions?limit=1000'),j('/api/patterns?limit=15'),j('/api/stats/overview')]);let x=l.latest;tx('clock',new Date().toLocaleTimeString());if(x){tx('gn','#N'+x.n);document.getElementById('pc').innerHTML=(x.player_suits||'').split(',').filter(Boolean).map((s,i)=>card('P'+(i+1),s)).join('');document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')}if(l.prediction){let q=l.prediction;tx('ps',q.symbol);tx('pn',q.symbol+' — enseigne');tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy);tx('rate',q.hit_rate+'%');tx('margin',(q.margin>=0?'+':'')+q.margin+' pts');tx('sample',q.sample);tx('conf',Math.round(q.confidence*100)+'%')}tx('total',st.total_hands);tx('preds',h.length);tx('valid',h.filter(x=>x.status==='VALID').length);tx('invalid',h.filter(x=>x.status==='INVALID').length);tx('pcount',p.length);document.getElementById('hist').innerHTML=h.map(x=>`<tr><td>#${x.target_n}</td><td><b>${sm[x.prediction_suit]||x.prediction_suit}</b></td><td>${x.strategy||'AUTO'}</td><td>${x.hit_rate}%</td><td>${x.margin>=0?'+':''}${x.margin}</td><td><span class="status ${x.status==='VALID'?'valid':x.status==='INVALID'?'invalid':'pending'}">${x.status}</span></td><td>${sm[x.actual_first_suit]||'—'}</td></tr>`).join('')||'<tr><td colspan="7">Aucune prédiction.</td></tr>';document.getElementById('patterns').innerHTML=p.map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">×${x.occurrences}</span></div>`).join('')||'Aucun schéma récurrent.'}catch(e){tx('out','Erreur : '+e)}}async function collect(n){tx('out','Collecte + validation + recalibrage…');try{let d=await j('/api/collect?pages='+n,{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Erreur : '+e)}}async function full(){let d=await j('/api/analysis/full');document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}async function copyPred(){try{let h=await j('/api/predictions?limit=1000');let t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'AUTO'} | ${x.hit_rate}% | marge ${x.margin>=0?'+':''}${x.margin} | ${x.status} | réel ${sm[x.actual_first_suit]||'—'}`).join('\n');await navigator.clipboard.writeText(t||'Aucune prédiction');let b=document.querySelector('button');let old=b.textContent;b.textContent='Copié ✓';setTimeout(()=>b.textContent=old,1300)}catch(e){alert('Copie indisponible sur cet appareil.')}}refreshAll();setInterval(refreshAll,3000);</script></body></html>""".replace("{port}",str(PORT))
 
 # Main
 if __name__ == "__main__":
