@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
 Xcode SUIT CARD STRATÉGIE CREATOR
-Version simple (stdlib + requests + bs4) — fonctionne
-sans FastAPI
-
-Focus : prédiction consécutive de l'enseigne (suit) de la 1ère carte JOUEUR.
-Cadence réelle ≈ 60 secondes par jeu.
-Stockage 100 % serveur (SQLite). Aucun localStorage.
-Détection formats 3-3 / 3 cartes Joueur comme alertes potentielles de shift algo.
+Version améliorée — prédictions consécutives automatiques
+Focus : enseigne (suit) de la 1ère carte JOUEUR
+Stockage 100 % serveur (SQLite) — pas de localStorage
 """
 import os
 import sys
@@ -33,15 +29,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 PORT = int(os.environ.get("PORT", 8000))
+AUTO_COLLECT_INTERVAL = 90  # secondes (0 = désactivé)
 
 # -------------------------------------------------
 # Parser
 # -------------------------------------------------
 SUIT_MAP = {
-    "♥": "H",
-    "♦": "D",
-    "♠": "S",
-    "♣": "C",
+    "♥": "H", "♦": "D", "♠": "S", "♣": "C",
+    "♥️": "H", "♦️": "D", "♠️": "S", "♣️": "C",
 }
 COLOR_MAP = {"H": "R", "D": "R", "S": "B", "C": "B"}
 RANK_VALUE = {
@@ -49,13 +44,16 @@ RANK_VALUE = {
     "6": 6, "7": 7, "8": 8, "9": 9,
     "10": 0, "T": 0, "J": 0, "Q": 0, "K": 0,
 }
+SUITS = ["H", "D", "S", "C"]
+EMOJI = {"H": "♥", "D": "♦", "S": "♠", "C": "♣"}
+SUIT_NAME = {"H": "Cœur", "D": "Carreau", "S": "Pique", "C": "Trèfle"}
 
 HAND_RE = re.compile(
     r"#N(\d+)\s*\.\s*(\d+)\s*\(([^)]+)\)\s*-\s*"
     r"(\d+)\s*\(([^)]+)\)\s*(#T\d+)?\s*(#R)?",
     re.I,
 )
-CARD_RE = re.compile(r"(A|10|[2-9JQKT])\s*([♥♦♠♣])", re.I)
+CARD_RE = re.compile(r"(A|10|[2-9JQKT])\s*([♥♦♠♣]|♥️|♦️|♠️|♣️)", re.I)
 
 def parse_cards(s):
     cards = []
@@ -85,11 +83,11 @@ def parse_message(text, msg_id=None):
         return None
     p_count = len(p_cards)
     b_count = len(b_cards)
-    # Flags utiles pour anticiper et pour alerte shift
-    is_player_3 = p_count >= 3
-    is_banker_3 = b_count >= 3
-    is_33 = is_player_3 and is_banker_3
-    is_22 = p_count == 2 and b_count == 2
+    # Format detection
+    fmt = f"{p_count}-{b_count}"
+    is_33 = (p_count == 3 and b_count == 3)
+    is_22 = (p_count == 2 and b_count == 2)
+    player_drew_3 = (p_count == 3)
     return {
         "n": int(n),
         "player_score": int(ps),
@@ -100,19 +98,17 @@ def parse_message(text, msg_id=None):
         "is_r": bool(r_tag),
         "message_id": msg_id,
         "raw": text.strip(),
-        "player_card_count": p_count,
-        "banker_card_count": b_count,
-        "is_player_3": is_player_3,
-        "is_banker_3": is_banker_3,
+        "format": fmt,
         "is_33": is_33,
         "is_22": is_22,
+        "player_drew_3": player_drew_3,
     }
 
 # -------------------------------------------------
 # Database
 # -------------------------------------------------
 def get_conn():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -141,10 +137,10 @@ def init_db():
         is_r INTEGER DEFAULT 0,
         player_card_count INTEGER,
         banker_card_count INTEGER,
-        is_player_3 INTEGER DEFAULT 0,
-        is_banker_3 INTEGER DEFAULT 0,
+        format TEXT,
         is_33 INTEGER DEFAULT 0,
         is_22 INTEGER DEFAULT 0,
+        player_drew_3 INTEGER DEFAULT 0,
         message_id INTEGER,
         collected_at TEXT,
         source TEXT DEFAULT 'web'
@@ -152,6 +148,8 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_n ON hands(n);
     CREATE INDEX IF NOT EXISTS idx_pfs ON hands(player_first_suit);
     CREATE INDEX IF NOT EXISTS idx_bfs ON hands(banker_first_suit);
+    CREATE INDEX IF NOT EXISTS idx_fmt ON hands(format);
+
     CREATE TABLE IF NOT EXISTS collection_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT,
@@ -160,31 +158,49 @@ def init_db():
         status TEXT,
         error TEXT
     );
+
     CREATE TABLE IF NOT EXISTS predictions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, target_n INTEGER UNIQUE NOT NULL,
-        created_at TEXT NOT NULL, prediction_suit TEXT NOT NULL, strategy TEXT,
-        confidence REAL DEFAULT 0, hit_rate REAL DEFAULT 0, margin REAL DEFAULT 0,
-        basis_n INTEGER, basis_first_suit TEXT, status TEXT DEFAULT 'PENDING',
-        actual_first_suit TEXT, validated_at TEXT, note TEXT
-    );
-    CREATE TABLE IF NOT EXISTS pattern_observations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, pattern TEXT UNIQUE NOT NULL,
-        occurrences INTEGER DEFAULT 0, last_seen_n INTEGER, updated_at TEXT NOT NULL
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_n INTEGER UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
+        prediction_suit TEXT NOT NULL,
+        strategy TEXT,
+        confidence REAL DEFAULT 0,
+        hit_rate REAL DEFAULT 0,
+        margin REAL DEFAULT 0,
+        basis_n INTEGER,
+        basis_first_suit TEXT,
+        status TEXT DEFAULT 'PENDING',
+        actual_first_suit TEXT,
+        validated_at TEXT,
+        note TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_predictions_target ON predictions(target_n);
     CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
+
+    CREATE TABLE IF NOT EXISTS pattern_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern TEXT UNIQUE NOT NULL,
+        occurrences INTEGER DEFAULT 0,
+        last_seen_n INTEGER,
+        updated_at TEXT NOT NULL,
+        context TEXT
+    );
     """)
-    # Migration douce pour les colonnes ajoutées (3-3 / flags)
-    for col, typ in [
-        ("is_player_3", "INTEGER DEFAULT 0"),
-        ("is_banker_3", "INTEGER DEFAULT 0"),
-        ("is_33", "INTEGER DEFAULT 0"),
-        ("is_22", "INTEGER DEFAULT 0"),
-    ]:
-        try:
-            conn.execute(f"ALTER TABLE hands ADD COLUMN {col} {typ}")
-        except sqlite3.OperationalError:
-            pass  # colonne déjà présente
+    # Migrations légères
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(hands)").fetchall()}
+        for col, typ in [
+            ("format", "TEXT"), ("is_33", "INTEGER DEFAULT 0"),
+            ("is_22", "INTEGER DEFAULT 0"), ("player_drew_3", "INTEGER DEFAULT 0"),
+        ]:
+            if col not in cols:
+                conn.execute(f"ALTER TABLE hands ADD COLUMN {col} {typ}")
+        pcols = {r[1] for r in conn.execute("PRAGMA table_info(pattern_observations)").fetchall()}
+        if "context" not in pcols:
+            conn.execute("ALTER TABLE pattern_observations ADD COLUMN context TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -206,7 +222,7 @@ def upsert_hands(parsed_list):
                 player_first_val, banker_first_val,
                 player_red, player_black, banker_red, banker_black,
                 t_tag, is_r, player_card_count, banker_card_count,
-                is_player_3, is_banker_3, is_33, is_22,
+                format, is_33, is_22, player_drew_3,
                 message_id, collected_at, source
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
@@ -224,12 +240,9 @@ def upsert_hands(parsed_list):
             sum(1 for c in b if c["color"] == "R"),
             sum(1 for c in b if c["color"] == "B"),
             h["t_tag"], 1 if h["is_r"] else 0,
-            h.get("player_card_count", len(p)),
-            h.get("banker_card_count", len(b)),
-            1 if h.get("is_player_3") else 0,
-            1 if h.get("is_banker_3") else 0,
-            1 if h.get("is_33") else 0,
-            1 if h.get("is_22") else 0,
+            len(p), len(b),
+            h.get("format"), 1 if h.get("is_33") else 0,
+            1 if h.get("is_22") else 0, 1 if h.get("player_drew_3") else 0,
             h.get("message_id"),
             datetime.utcnow().isoformat(), "web",
         ))
@@ -243,8 +256,13 @@ def get_stats():
     total = conn.execute("SELECT COUNT(*) FROM hands").fetchone()[0]
     oldest = conn.execute("SELECT MIN(n) FROM hands").fetchone()[0]
     latest = conn.execute("SELECT MAX(n) FROM hands").fetchone()[0]
+    n33 = conn.execute("SELECT COUNT(*) FROM hands WHERE is_33=1").fetchone()[0]
+    n22 = conn.execute("SELECT COUNT(*) FROM hands WHERE is_22=1").fetchone()[0]
     conn.close()
-    return {"total_hands": total, "oldest_n": oldest, "latest_n": latest}
+    return {
+        "total_hands": total, "oldest_n": oldest, "latest_n": latest,
+        "count_33": n33, "count_22": n22,
+    }
 
 def get_all_hands():
     conn = get_conn()
@@ -252,27 +270,59 @@ def get_all_hands():
     conn.close()
     return [dict(r) for r in rows]
 
-def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None):
-    if not prediction: return
-    conn=get_conn()
-    conn.execute("""INSERT INTO predictions
-      (target_n,created_at,prediction_suit,strategy,confidence,hit_rate,margin,basis_n,basis_first_suit)
-      VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(target_n) DO UPDATE SET
-      prediction_suit=excluded.prediction_suit,strategy=excluded.strategy,confidence=excluded.confidence,
-      hit_rate=excluded.hit_rate,margin=excluded.margin,basis_n=excluded.basis_n,basis_first_suit=excluded.basis_first_suit
-    """,(target_n,datetime.utcnow().isoformat(),prediction['suit'],prediction.get('strategy'),prediction.get('confidence',0),prediction.get('hit_rate',0),prediction.get('margin',0),basis_n,basis_first_suit))
-    conn.commit(); conn.close()
+def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None, note=None):
+    if not prediction:
+        return
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO predictions
+          (target_n, created_at, prediction_suit, strategy, confidence, hit_rate, margin,
+           basis_n, basis_first_suit, note)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(target_n) DO UPDATE SET
+          prediction_suit=excluded.prediction_suit,
+          strategy=excluded.strategy,
+          confidence=excluded.confidence,
+          hit_rate=excluded.hit_rate,
+          margin=excluded.margin,
+          basis_n=excluded.basis_n,
+          basis_first_suit=excluded.basis_first_suit,
+          note=excluded.note,
+          created_at=excluded.created_at
+    """, (
+        target_n, datetime.utcnow().isoformat(),
+        prediction["suit"], prediction.get("strategy"),
+        prediction.get("confidence", 0), prediction.get("hit_rate", 0),
+        prediction.get("margin", 0), basis_n, basis_first_suit, note,
+    ))
+    conn.commit()
+    conn.close()
 
 def validate_predictions():
-    conn=get_conn(); rows=conn.execute("""SELECT p.id,p.target_n,p.prediction_suit,h.player_first_suit
-      FROM predictions p JOIN hands h ON h.n=p.target_n WHERE p.status='PENDING'""").fetchall()
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT p.id, p.target_n, p.prediction_suit, h.player_first_suit
+        FROM predictions p
+        JOIN hands h ON h.n = p.target_n
+        WHERE p.status = 'PENDING'
+    """).fetchall()
     for r in rows:
-        status='VALID' if r['player_first_suit']==r['prediction_suit'] else 'INVALID'
-        conn.execute("UPDATE predictions SET status=?,actual_first_suit=?,validated_at=? WHERE id=?",(status,r['player_first_suit'],datetime.utcnow().isoformat(),r['id']))
-    conn.commit(); conn.close()
+        status = "VALID" if r["player_first_suit"] == r["prediction_suit"] else "INVALID"
+        conn.execute(
+            "UPDATE predictions SET status=?, actual_first_suit=?, validated_at=? WHERE id=?",
+            (status, r["player_first_suit"], datetime.utcnow().isoformat(), r["id"]),
+        )
+    conn.commit()
+    conn.close()
+    return len(rows)
 
-def get_prediction_history(limit=100):
-    conn=get_conn(); rows=conn.execute("SELECT * FROM predictions ORDER BY target_n DESC LIMIT ?",(int(limit),)).fetchall(); conn.close(); return [dict(r) for r in rows]
+def get_prediction_history(limit=200):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM predictions ORDER BY target_n DESC LIMIT ?", (int(limit),)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 def record_patterns(hands):
     if len(hands) < 3:
@@ -284,35 +334,39 @@ def record_patterns(hands):
         if not all(vals):
             continue
         pattern = "P:" + ">".join(vals)
-        conn.execute(
-            """INSERT INTO pattern_observations(pattern,occurrences,last_seen_n,updated_at)
-               VALUES(?,?,?,?)
-               ON CONFLICT(pattern) DO UPDATE SET
-                 occurrences=occurrences+1,
-                 last_seen_n=excluded.last_seen_n,
-                 updated_at=excluded.updated_at""",
-            (pattern, 1, hands[i]["n"], now),
-        )
-        # Schéma spécifique après un 3-3
-        prev = hands[i - 1]
-        if prev.get("is_33") or (
-            prev.get("player_card_count", 0) >= 3 and prev.get("banker_card_count", 0) >= 3
-        ):
-            p33 = "AFTER33:" + ">".join(vals[-2:])  # les 2 suivantes après 3-3
-            conn.execute(
-                """INSERT INTO pattern_observations(pattern,occurrences,last_seen_n,updated_at)
-                   VALUES(?,?,?,?)
-                   ON CONFLICT(pattern) DO UPDATE SET
-                     occurrences=occurrences+1,
-                     last_seen_n=excluded.last_seen_n,
-                     updated_at=excluded.updated_at""",
-                (p33, 1, hands[i]["n"], now),
-            )
+        ctx = hands[i].get("format") or ""
+        conn.execute("""
+            INSERT INTO pattern_observations(pattern, occurrences, last_seen_n, updated_at, context)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(pattern) DO UPDATE SET
+              occurrences = occurrences + 1,
+              last_seen_n = excluded.last_seen_n,
+              updated_at = excluded.updated_at,
+              context = excluded.context
+        """, (pattern, 1, hands[i]["n"], now, ctx))
+        # Schéma après 3-3
+        if hands[i - 1].get("is_33"):
+            p33 = "AFTER33:" + (hands[i].get("player_first_suit") or "?")
+            conn.execute("""
+                INSERT INTO pattern_observations(pattern, occurrences, last_seen_n, updated_at, context)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(pattern) DO UPDATE SET
+                  occurrences = occurrences + 1,
+                  last_seen_n = excluded.last_seen_n,
+                  updated_at = excluded.updated_at
+            """, (p33, 1, hands[i]["n"], now, "post-33"))
     conn.commit()
     conn.close()
 
-def get_patterns(limit=20):
-    conn=get_conn(); rows=conn.execute("SELECT pattern,occurrences,last_seen_n FROM pattern_observations ORDER BY occurrences DESC,last_seen_n DESC LIMIT ?",(int(limit),)).fetchall(); conn.close(); return [dict(r) for r in rows]
+def get_patterns(limit=25):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT pattern, occurrences, last_seen_n, context FROM pattern_observations "
+        "ORDER BY occurrences DESC, last_seen_n DESC LIMIT ?",
+        (int(limit),),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 # -------------------------------------------------
 # Collector
@@ -338,11 +392,11 @@ def fetch_page(before=None):
         te = w.select_one(".tgme_widget_message_text")
         if te:
             text = te.get_text(separator=" ", strip=True)
-            if text and "#N" in text[:40]:
+            if text and "#N" in text[:50]:
                 messages.append({"id": mid, "text": text})
     return messages, (min(ids) if ids else None)
 
-def collect(pages=10, delay=0.45):
+def collect(pages=10, delay=0.4):
     all_parsed = []
     seen = set()
     before = None
@@ -365,41 +419,28 @@ def collect(pages=10, delay=0.45):
     return all_parsed
 
 # -------------------------------------------------
-# Analyzer
+# Analyzer & Strategy Engine
 # -------------------------------------------------
-SUITS = ["H", "D", "S", "C"]
-EMOJI = {"H": "♥", "D": "♦", "S": "♠", "C": "♣"}
-
 def analyze(hands):
     if not hands:
         return {"error": "Aucune donnée"}
 
     p_first = Counter()
     b_first = Counter()
-    n_33 = 0
-    n_player3 = 0
     for h in hands:
         if h.get("player_first_suit"):
             p_first[h["player_first_suit"]] += 1
         if h.get("banker_first_suit"):
             b_first[h["banker_first_suit"]] += 1
-        if h.get("is_33") or (h.get("player_card_count", 0) >= 3 and h.get("banker_card_count", 0) >= 3):
-            n_33 += 1
-        if h.get("is_player_3") or h.get("player_card_count", 0) >= 3:
-            n_player3 += 1
 
     def pct(c):
         t = sum(c.values()) or 1
         return {s: round(100 * c[s] / t, 2) for s in SUITS}
 
-    def transitions(side, only_after_33=False):
+    def transitions(side):
         key = "player_first_suit" if side == "player" else "banker_first_suit"
         counts = defaultdict(lambda: defaultdict(int))
         for i in range(len(hands) - 1):
-            if only_after_33:
-                prev = hands[i]
-                if not (prev.get("is_33") or (prev.get("player_card_count", 0) >= 3 and prev.get("banker_card_count", 0) >= 3)):
-                    continue
             s1 = hands[i].get(key)
             s2 = hands[i + 1].get(key)
             if s1 and s2:
@@ -414,8 +455,6 @@ def analyze(hands):
 
     tp, tp_c = transitions("player")
     tb, tb_c = transitions("banker")
-    # Transitions spéciales après un 3-3 (alerte shift possible)
-    tp33, tp33_c = transitions("player", only_after_33=True)
 
     strategies = []
     for side, matrix, counts in [
@@ -442,35 +481,9 @@ def analyze(hands):
                         "confidence": round(
                             min(rate / 50, 1) * min(total, 150) / 150, 3
                         ),
-                        "after_33": False,
                     })
 
-    # Stratégies dédiées après format 3-3 (plus vigilantes)
-    for fs in SUITS:
-        total = sum(tp33_c.get(fs, {}).values())
-        if total < 8:
-            continue
-        for ts in SUITS:
-            rate = tp33[fs][ts]
-            if rate >= 28:
-                strategies.append({
-                    "name": f"After33_P_{fs}_to_{ts}",
-                    "description": (
-                        f"Après un 3-3, si 1ère Joueur = {EMOJI[fs]} → "
-                        f"suivante ≈ {rate}% {EMOJI[ts]} (vigilance shift)"
-                    ),
-                    "side": "player",
-                    "from": fs,
-                    "to": ts,
-                    "hit_rate": rate,
-                    "sample": total,
-                    "confidence": round(
-                        min(rate / 45, 1) * min(total, 80) / 80, 3
-                    ),
-                    "after_33": True,
-                })
-
-    strategies.sort(key=lambda x: (x.get("after_33", False), x["confidence"]), reverse=True)
+    strategies.sort(key=lambda x: (x["confidence"], x["hit_rate"], x["sample"]), reverse=True)
     return {
         "n_hands": len(hands),
         "n_range": {"min": hands[0]["n"], "max": hands[-1]["n"]},
@@ -478,12 +491,63 @@ def analyze(hands):
         "banker_first": pct(b_first),
         "transitions_player": tp,
         "transitions_banker": tb,
-        "transitions_after_33": tp33,
-        "n_33": n_33,
-        "n_player3": n_player3,
         "strategies": strategies[:20],
         "strategies_count": len(strategies),
     }
+
+def pick_best_prediction(hands, report):
+    """Choisit la meilleure stratégie adaptée au dernier jeu et prédit le suivant."""
+    if not hands or not report.get("strategies"):
+        return None, None
+    latest = hands[-1]
+    # Priorité absolue : transitions PLAYER (enseigne joueur)
+    applicable = [
+        x for x in report["strategies"]
+        if x["side"] == "player" and x["from"] == latest.get("player_first_suit")
+    ]
+    # Fallback : banker si rien de solide côté player
+    if not applicable or max(a["confidence"] for a in applicable) < 0.25:
+        b_app = [
+            x for x in report["strategies"]
+            if x["side"] == "banker" and x["from"] == latest.get("banker_first_suit")
+        ]
+        if b_app and (not applicable or max(b["confidence"] for b in b_app) > max(a["confidence"] for a in applicable)):
+            applicable = b_app
+
+    if not applicable:
+        # Fallback global : suit le plus fréquent côté joueur
+        pf = report.get("player_first") or {}
+        if pf:
+            best_s = max(pf, key=pf.get)
+            return {
+                "suit": best_s,
+                "symbol": EMOJI[best_s],
+                "hit_rate": pf[best_s],
+                "confidence": 0.15,
+                "sample": report.get("n_hands", 0),
+                "margin": round(pf[best_s] - 25, 2),
+                "strategy": "FREQ_PLAYER",
+            }, latest
+        return None, latest
+
+    best = max(applicable, key=lambda x: (x["confidence"], x["hit_rate"], x["sample"]))
+    note = None
+    if latest.get("is_33"):
+        note = "ATTENTION: main précédente 3-3 (possible signal de changement d'algo)"
+    elif latest.get("player_drew_3"):
+        note = "Joueur a tiré 3 cartes sur la main précédente"
+
+    pred = {
+        "suit": best["to"],
+        "symbol": EMOJI[best["to"]],
+        "hit_rate": best["hit_rate"],
+        "confidence": best["confidence"],
+        "sample": best["sample"],
+        "margin": round(best["hit_rate"] - 25, 2),
+        "strategy": best["name"],
+        "note": note,
+    }
+    return pred, latest
 
 # -------------------------------------------------
 # HTTP Handler
@@ -519,11 +583,11 @@ class Handler(BaseHTTPRequestHandler):
             html = html.replace("{total_hands}", str(stats["total_hands"]))
             html = html.replace(
                 "{oldest_n}",
-                str(stats["oldest_n"] if stats["oldest_n"] is not None else "—")
+                str(stats["oldest_n"] if stats["oldest_n"] is not None else "—"),
             )
             html = html.replace(
                 "{latest_n}",
-                str(stats["latest_n"] if stats["latest_n"] is not None else "—")
+                str(stats["latest_n"] if stats["latest_n"] is not None else "—"),
             )
             self.send_html(html)
 
@@ -545,96 +609,43 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/live":
             hands = get_all_hands()
             report = analyze(hands)
-            latest = hands[-1] if hands else None
-            prediction = None
-            alert_33 = False
-            note = ""
-            if latest and report.get("strategies"):
-                # Priorité absolue aux stratégies "après 3-3" si le dernier jeu était un 3-3
-                last_was_33 = bool(latest.get("is_33") or (
-                    latest.get("player_card_count", 0) >= 3 and latest.get("banker_card_count", 0) >= 3
-                ))
-                if last_was_33:
-                    alert_33 = True
-                    note = "⚠ Dernier jeu = format 3-3 → vigilance shift possible"
-                applicable = [
-                    x for x in report["strategies"]
-                    if x["side"] == "player" and x["from"] == latest.get("player_first_suit")
-                    and (x.get("after_33") == last_was_33 or not last_was_33)
-                ]
-                # Fallback : n'importe quelle stratégie player applicable
-                if not applicable:
-                    applicable = [
-                        x for x in report["strategies"]
-                        if x["side"] == "player" and x["from"] == latest.get("player_first_suit")
-                    ]
-                # Dernier recours : banker
-                if not applicable:
-                    applicable = [
-                        x for x in report["strategies"]
-                        if x["side"] == "banker" and x["from"] == latest.get("banker_first_suit")
-                    ]
-                if applicable:
-                    # On privilégie la confiance + sample + (after_33 si pertinent)
-                    best = max(
-                        applicable,
-                        key=lambda x: (
-                            1 if x.get("after_33") and last_was_33 else 0,
-                            x["confidence"],
-                            x["hit_rate"],
-                            x["sample"],
-                        )
-                    )
-                    prediction = {
-                        "suit": best["to"],
-                        "symbol": EMOJI[best["to"]],
-                        "hit_rate": best["hit_rate"],
-                        "confidence": best["confidence"],
-                        "sample": best["sample"],
-                        "margin": round(best["hit_rate"] - 25, 2),
-                        "strategy": best["name"],
-                        "after_33": bool(best.get("after_33")),
-                    }
-                    upsert_prediction(
-                        latest["n"] + 1,
-                        prediction,
-                        latest["n"],
-                        latest.get("player_first_suit"),
-                    )
-            validate_predictions()
+            prediction, latest = pick_best_prediction(hands, report)
+            if prediction and latest:
+                upsert_prediction(
+                    latest["n"] + 1,
+                    prediction,
+                    latest["n"],
+                    latest.get("player_first_suit"),
+                    prediction.get("note"),
+                )
+            validated = validate_predictions()
             record_patterns(hands)
-            # Enrichir latest avec flags pour le front
-            if latest:
-                latest = dict(latest)
-                latest["is_33"] = bool(latest.get("is_33") or (
-                    latest.get("player_card_count", 0) >= 3 and latest.get("banker_card_count", 0) >= 3
-                ))
-                latest["is_player_3"] = bool(latest.get("is_player_3") or latest.get("player_card_count", 0) >= 3)
+            # Stats prédictions
+            hist = get_prediction_history(300)
+            n_valid = sum(1 for x in hist if x["status"] == "VALID")
+            n_invalid = sum(1 for x in hist if x["status"] == "INVALID")
+            n_pending = sum(1 for x in hist if x["status"] == "PENDING")
             self.send_json({
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "latest": latest,
                 "prediction": prediction,
                 "prediction_target_n": (latest["n"] + 1) if latest else None,
-                "prediction_history": get_prediction_history(150),
+                "prediction_history": hist[:100],
                 "patterns": get_patterns(20),
-                "alert_33": alert_33,
-                "note": note,
-                "stats_33": {
-                    "n_33": report.get("n_33", 0),
-                    "n_player3": report.get("n_player3", 0),
+                "validated_now": validated,
+                "pred_stats": {
+                    "total": len(hist), "valid": n_valid,
+                    "invalid": n_invalid, "pending": n_pending,
                 },
-                "timing": {
-                    "game_seconds": 60,
-                    "mode": "consecutive_next_game",
-                    "description": "1 jeu ≈ 60 secondes — prédiction du prochain #N dès que la main précédente est connue",
-                },
+                "timing": {"game_minutes": 60, "mode": "consecutive_next_game"},
             })
 
         elif path == "/api/predictions":
-            validate_predictions(); self.send_json(get_prediction_history(int(qs.get("limit",[100])[0])))
+            validate_predictions()
+            self.send_json(get_prediction_history(int(qs.get("limit", [200])[0])))
 
         elif path == "/api/patterns":
-            self.send_json(get_patterns(int(qs.get("limit",[30])[0])))
+            self.send_json(get_patterns(int(qs.get("limit", [30])[0])))
 
         elif path == "/api/hands":
             limit = int(qs.get("limit", [50])[0])
@@ -642,7 +653,8 @@ class Handler(BaseHTTPRequestHandler):
             conn = get_conn()
             rows = conn.execute(
                 "SELECT n, player_score, banker_score, player_suits, banker_suits, "
-                "player_first_suit, banker_first_suit, t_tag, is_r "
+                "player_first_suit, banker_first_suit, format, is_33, is_22, "
+                "player_drew_3, t_tag, is_r "
                 "FROM hands ORDER BY n DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
@@ -665,6 +677,14 @@ class Handler(BaseHTTPRequestHandler):
                 hands_now = get_all_hands()
                 record_patterns(hands_now)
                 validate_predictions()
+                # Recalcul immédiat de la prédiction suivante
+                report = analyze(hands_now)
+                pred, latest = pick_best_prediction(hands_now, report)
+                if pred and latest:
+                    upsert_prediction(
+                        latest["n"] + 1, pred, latest["n"],
+                        latest.get("player_first_suit"), pred.get("note"),
+                    )
                 conn = get_conn()
                 conn.execute(
                     "INSERT INTO collection_logs "
@@ -677,29 +697,285 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "hands_found": len(parsed),
                     "hands_new": new,
-                    "message": f"{new} nouvelles mains enregistrées",
+                    "message": f"{new} nouvelles mains enregistrées — stratégie recalibrée",
+                    "next_prediction": pred,
                 })
             except Exception as e:
                 self.send_json({"status": "error", "error": str(e)}, 500)
         else:
             self.send_json({"error": "Not found"}, 404)
 
-DASHBOARD = """<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Xcode Suit Card — Live</title><style>
-:root{--bg:#050b14;--p:#0d1c2e;--p2:#091625;--l:#213b58;--t:#f4f7fb;--m:#8fa7bf;--b:#4f8cff;--g:#22d39b;--r:#ff5876;--y:#f6c653}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#143452,#050b14 42%);color:var(--t);font-family:Inter,system-ui,sans-serif}.shell{max-width:1400px;margin:auto;padding:22px}.top,.head,.row{display:flex;align-items:center;justify-content:space-between;gap:12px}.top{margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.logo{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#4f8cff,#7b5cff);font-size:25px}h1{margin:0;font-size:clamp(1.3rem,3vw,2rem)}.sub{margin:4px 0 0;color:var(--m);font-size:.8rem}.live,.pill{border-radius:999px;padding:7px 10px;font-size:.68rem;font-weight:850}.live{color:#8ef0d3;background:#08231f;border:1px solid #1c4c42}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--g);margin-right:6px}.hero,.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:15px}.panel{background:linear-gradient(180deg,#10243a,#091725);border:1px solid var(--l);border-radius:18px;overflow:hidden;box-shadow:0 16px 45px #0005}.head{padding:15px 18px;border-bottom:1px solid var(--l)}.ey{color:var(--m);font-size:.62rem;text-transform:uppercase;letter-spacing:.13em}.title{font-weight:850;margin-top:3px}.body{padding:18px}.livegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.box{background:#06111d88;border:1px solid var(--l);border-radius:14px;padding:15px}.num{font-size:1.9rem;font-weight:950;margin:4px 0 12px}.cards{display:flex;gap:7px;flex-wrap:wrap}.card{width:53px;height:66px;border-radius:10px;background:#f8fafc;color:#101827;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900}.card small{font-size:1.1rem}.red{color:#e11d48}.pred{display:flex;align-items:center;gap:13px}.suit{font-size:4.2rem}.pname{font-size:1.35rem;font-weight:950}.metrics,.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.metrics{margin-top:16px}.metric,.stat{background:var(--p2);border-radius:11px;padding:10px}.metric span,.small{display:block;color:var(--m);font-size:.61rem;text-transform:uppercase}.metric b{font-size:1.02rem}.green{color:var(--g)}.yellow{color:var(--y)}.stats{grid-template-columns:repeat(5,1fr);margin:15px 0}.stat{padding:15px}.val{font-size:1.3rem;font-weight:950;margin-top:4px}.grid{margin-top:15px}.tablewrap{max-height:480px;overflow:auto}.table{width:100%;border-collapse:collapse;font-size:.75rem}.table th,.table td{padding:9px 11px;border-bottom:1px solid #193149;text-align:left;white-space:nowrap}.table th{position:sticky;top:0;background:#0d2034;color:var(--m);font-size:.6rem}.status{padding:4px 7px;border-radius:999px;font-weight:900}.valid{background:#21d39b22;color:#67efc2}.invalid{background:#ff587622;color:#ff8aa0}.pending{background:#f6c65322;color:#ffd976}.actions{display:flex;gap:8px;flex-wrap:wrap;padding:14px 18px}button{border:0;border-radius:9px;padding:9px 12px;color:#fff;background:var(--b);font-weight:800}button.alt{background:#17334f;border:1px solid var(--l)}.patterns{padding:8px 18px 15px}.pattern{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #193149}.count{color:var(--y);font-weight:900}.out{padding:14px 18px;min-height:80px;color:#b9c9da;font:11px ui-monospace,monospace;white-space:pre-wrap}.foot{text-align:center;color:#637c96;font-size:.67rem;padding:18px}@media(max-width:900px){.hero,.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.shell{padding:12px}.top{align-items:flex-start}.livegrid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.stats .stat:last-child{grid-column:1/-1}}
-</style></head><body><div class="shell"><header class="top"><div class="brand"><div class="logo">♠</div><div><h1>Xcode Suit Card</h1><div class="sub">Moteur séquentiel • stratégie adaptative • mémoire serveur</div></div></div><div class="live"><span class="dot"></span>LIVE • 3s</div></header>
-<section class="hero"><div class="panel"><div class="head"><div><div class="ey">Flux TG</div><div class="title">Jeu actuel / dernier jeu reçu</div></div><span id="clock" class="pill">—</span></div><div class="body"><div class="livegrid"><div class="box"><div class="ey">PLAYER</div><div id="gn" class="num">—</div><div id="pc" class="cards">—</div></div><div class="box"><div class="ey">BANKER</div><div id="bc" class="cards">—</div><div style="margin-top:14px" class="ey">Cadence</div><b>1 jeu ≈ 60 s</b><div id="alert33" style="margin-top:8px;font-size:.7rem;color:var(--y);display:none">⚠ 3-3 détecté</div></div></div></div></div>
-<div class="panel"><div class="head"><div><div class="ey">Décision automatique</div><div class="title">Prochain jeu</div></div><span id="strat" class="pill">AUTO</span></div><div class="body"><div class="pred"><div id="ps" class="suit">—</div><div><div class="ey">Enseigne du joueur</div><div id="pn" class="pname">En attente</div><span id="target" class="pill">Cible —</span></div></div><div class="metrics"><div class="metric"><span>Taux historique</span><b id="rate">—</b></div><div class="metric"><span>Marge vs 25%</span><b id="margin" class="green">—</b></div><div class="metric"><span>Échantillon</span><b id="sample">—</b></div><div class="metric"><span>Confiance</span><b id="conf">—</b></div></div></div></div></section>
-<section class="stats"><div class="panel stat"><span class="ey">Jeux</span><div id="total" class="val">—</div><div class="small">serveur</div></div><div class="panel stat"><span class="ey">Prédictions</span><div id="preds" class="val">—</div><div class="small">historique</div></div><div class="panel stat"><span class="ey">Validées</span><div id="valid" class="val">—</div><div class="small">vert</div></div><div class="panel stat"><span class="ey">Non validées</span><div id="invalid" class="val">—</div><div class="small">rouge</div></div><div class="panel stat"><span class="ey">Schémas</span><div id="pcount" class="val">—</div><div class="small">récurrents</div></div></section>
-<div class="grid"><section class="panel"><div class="head"><div><div class="ey">Mémoire serveur</div><div class="title">Historique de toutes les prédictions</div></div><button onclick="copyPred()">Copier</button></div><div class="tablewrap"><table class="table"><thead><tr><th>Jeu</th><th>Préd.</th><th>Stratégie</th><th>Taux</th><th>Marge</th><th>Statut</th><th>Réel</th></tr></thead><tbody id="hist"><tr><td colspan="7">Chargement…</td></tr></tbody></table></div></section>
-<section class="panel"><div class="head"><div><div class="ey">Exploration</div><div class="title">Schémas fréquemment répétés</div></div><span class="pill">AUTO</span></div><div id="patterns" class="patterns">Analyse…</div><div class="head"><div><div class="ey">Recalibrage</div><div class="title">Nouvelle collecte → nouvelle stratégie</div></div></div><div class="actions"><button onclick="collect(10)">Collecter 10</button><button class="alt" onclick="collect(25)">Collecter 25</button><button class="alt" onclick="full()">Analyse complète</button><button class="alt" onclick="refreshAll()">Actualiser</button></div><div id="out" class="out">La prédiction suivante est enregistrée côté serveur et validée dès que le jeu cible apparaît dans le flux.</div></section></div><div class="foot">Aucune prédiction n'est stockée dans localStorage. Les prédictions, validations et schémas sont enregistrés dans la base serveur. Les taux sont historiques et ne garantissent pas un résultat futur.</div></div>
-<script>const sm={H:'♥',D:'♦',S:'♠',C:'♣'},red=s=>s==='H'||s==='D';const tx=(id,v)=>document.getElementById(id).textContent=v??'—';const card=(r,s)=>`<div class="card ${red(s)?'red':'black'}"><strong>${r}</strong><small>${sm[s]||s}</small></div>`;async function j(u,o){return(await fetch(u,o)).json()}async function refreshAll(){try{const [l,h,p,st]=await Promise.all([j('/api/live'),j('/api/predictions?limit=1000'),j('/api/patterns?limit=20'),j('/api/stats/overview')]);let x=l.latest;tx('clock',new Date().toLocaleTimeString());const a33=document.getElementById('alert33');if(a33){a33.style.display=(l.alert_33||(x&&x.is_33))?'block':'none';if(l.note)a33.textContent=l.note}if(x){tx('gn','#N'+x.n+(x.is_33?' ⚠3-3':x.is_player_3?' (3P)':''));document.getElementById('pc').innerHTML=(x.player_suits||'').split(',').filter(Boolean).map((s,i)=>card('P'+(i+1),s)).join('')||'—';document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—'}if(l.prediction){let q=l.prediction;tx('ps',q.symbol);tx('pn',q.symbol+' — enseigne Joueur');tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy+(q.after_33?' ⚠':''));tx('rate',q.hit_rate+'%');tx('margin',(q.margin>=0?'+':'')+q.margin+' pts');tx('sample',q.sample);tx('conf',Math.round(q.confidence*100)+'%')}else{tx('ps','—');tx('pn','En attente');tx('target','Cible —');tx('strat','AUTO');tx('rate','—');tx('margin','—');tx('sample','—';tx('conf','—')}tx('total',st.total_hands);tx('preds',h.length);tx('valid',h.filter(x=>x.status==='VALID').length);tx('invalid',h.filter(x=>x.status==='INVALID').length);tx('pcount',p.length);document.getElementById('hist').innerHTML=h.map(x=>`<tr><td>#${x.target_n}</td><td><b>${sm[x.prediction_suit]||x.prediction_suit}</b></td><td>${x.strategy||'AUTO'}</td><td>${x.hit_rate}%</td><td>${x.margin>=0?'+':''}${x.margin}</td><td><span class="status ${x.status==='VALID'?'valid':x.status==='INVALID'?'invalid':'pending'}">${x.status}</span></td><td>${sm[x.actual_first_suit]||'—'}</td></tr>`).join('')||'<tr><td colspan="7">Aucune prédiction.</td></tr>';document.getElementById('patterns').innerHTML=p.map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">×${x.occurrences}</span></div>`).join('')||'Aucun schéma récurrent.';if(l.note){const o=document.getElementById('out');if(o&&!o.textContent.includes('Collecte'))o.textContent=l.note}}catch(e){tx('out','Erreur : '+e)}}async function collect(n){tx('out','Collecte + validation + recalibrage…');try{let d=await j('/api/collect?pages='+n,{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Erreur : '+e)}}async function full(){let d=await j('/api/analysis/full');document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}async function copyPred(){try{let h=await j('/api/predictions?limit=1000');let t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'AUTO'} | ${x.hit_rate}% | marge ${x.margin>=0?'+':''}${x.margin} | ${x.status} | réel ${sm[x.actual_first_suit]||'—'}`).join('\n');await navigator.clipboard.writeText(t||'Aucune prédiction');let b=document.querySelector('button');let old=b.textContent;b.textContent='Copié ✓';setTimeout(()=>b.textContent=old,1300)}catch(e){alert('Copie indisponible sur cet appareil.')}}refreshAll();setInterval(refreshAll,3000);</script></body></html>""".replace("{port}",str(PORT))
+DASHBOARD = r"""<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Xcode Suit Card — Live</title><style>
+:root{--bg:#050b14;--p:#0d1c2e;--p2:#091625;--l:#213b58;--t:#f4f7fb;--m:#8fa7bf;--b:#4f8cff;--g:#22d39b;--r:#ff5876;--y:#f6c653}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#143452,#050b14 42%);color:var(--t);font-family:Inter,system-ui,sans-serif}
+.shell{max-width:1400px;margin:auto;padding:22px}
+.top,.head,.row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.top{margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}
+.logo{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#4f8cff,#7b5cff);font-size:25px}
+h1{margin:0;font-size:clamp(1.3rem,3vw,2rem)}.sub{margin:4px 0 0;color:var(--m);font-size:.8rem}
+.live,.pill{border-radius:999px;padding:7px 10px;font-size:.68rem;font-weight:850}
+.live{color:#8ef0d3;background:#08231f;border:1px solid #1c4c42}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--g);margin-right:6px;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.hero,.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:15px}
+.panel{background:linear-gradient(180deg,#10243a,#091725);border:1px solid var(--l);border-radius:18px;overflow:hidden;box-shadow:0 16px 45px #0005}
+.head{padding:15px 18px;border-bottom:1px solid var(--l)}
+.ey{color:var(--m);font-size:.62rem;text-transform:uppercase;letter-spacing:.13em}
+.title{font-weight:850;margin-top:3px}.body{padding:18px}
+.livegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.box{background:#06111d88;border:1px solid var(--l);border-radius:14px;padding:15px}
+.num{font-size:1.9rem;font-weight:950;margin:4px 0 12px}
+.cards{display:flex;gap:7px;flex-wrap:wrap}
+.card{width:53px;height:66px;border-radius:10px;background:#f8fafc;color:#101827;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900}
+.card small{font-size:1.1rem}.red{color:#e11d48}
+.pred{display:flex;align-items:center;gap:13px}.suit{font-size:4.2rem}
+.pname{font-size:1.35rem;font-weight:950}
+.metrics,.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+.metrics{margin-top:16px}
+.metric,.stat{background:var(--p2);border-radius:11px;padding:10px}
+.metric span,.small{display:block;color:var(--m);font-size:.61rem;text-transform:uppercase}
+.metric b{font-size:1.02rem}.green{color:var(--g)}.yellow{color:var(--y)}.redc{color:var(--r)}
+.stats{grid-template-columns:repeat(5,1fr);margin:15px 0}.stat{padding:15px}
+.val{font-size:1.3rem;font-weight:950;margin-top:4px}
+.grid{margin-top:15px}
+.tablewrap{max-height:480px;overflow:auto}
+.table{width:100%;border-collapse:collapse;font-size:.75rem}
+.table th,.table td{padding:9px 11px;border-bottom:1px solid #193149;text-align:left;white-space:nowrap}
+.table th{position:sticky;top:0;background:#0d2034;color:var(--m);font-size:.6rem}
+.status{padding:4px 7px;border-radius:999px;font-weight:900}
+.valid{background:#21d39b22;color:#67efc2}.invalid{background:#ff587622;color:#ff8aa0}.pending{background:#f6c65322;color:#ffd976}
+.actions{display:flex;gap:8px;flex-wrap:wrap;padding:14px 18px}
+button{border:0;border-radius:9px;padding:9px 12px;color:#fff;background:var(--b);font-weight:800;cursor:pointer}
+button.alt{background:#17334f;border:1px solid var(--l)}
+.patterns{padding:8px 18px 15px;max-height:220px;overflow:auto}
+.pattern{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #193149}
+.count{color:var(--y);font-weight:900}
+.out{padding:14px 18px;min-height:60px;color:#b9c9da;font:11px ui-monospace,monospace;white-space:pre-wrap}
+.note{margin-top:10px;padding:8px 12px;border-radius:8px;background:#3a1a0a;border:1px solid #8b4513;color:#ffb070;font-size:.78rem}
+.foot{text-align:center;color:#637c96;font-size:.67rem;padding:18px}
+@media(max-width:900px){.hero,.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:600px){.shell{padding:12px}.top{align-items:flex-start}.livegrid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.stats .stat:last-child{grid-column:1/-1}}
+</style></head><body><div class="shell">
+<header class="top">
+  <div class="brand"><div class="logo">♠</div>
+    <div><h1>Xcode Suit Card</h1>
+    <div class="sub">Prédiction consécutive • enseigne JOUEUR • mémoire serveur</div></div>
+  </div>
+  <div class="live"><span class="dot"></span>LIVE • 3s</div>
+</header>
 
+<section class="hero">
+  <div class="panel">
+    <div class="head"><div><div class="ey">Flux TG</div><div class="title">Dernier jeu reçu</div></div>
+    <span id="clock" class="pill">—</span></div>
+    <div class="body">
+      <div class="livegrid">
+        <div class="box"><div class="ey">PLAYER</div><div id="gn" class="num">—</div>
+          <div id="pc" class="cards">—</div>
+          <div style="margin-top:10px" class="ey">Format</div><b id="fmt">—</b>
+        </div>
+        <div class="box"><div class="ey">BANKER</div>
+          <div id="bc" class="cards" style="margin-top:8px">—</div>
+          <div style="margin-top:14px" class="ey">Cadence</div><b>1 jeu ≈ 60 min</b>
+        </div>
+      </div>
+      <div id="alert33" class="note" style="display:none">⚠ Main 3-3 détectée — possible signal de changement d'algorithme. Vigilance accrue.</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="head"><div><div class="ey">Décision automatique</div><div class="title">Prochain jeu (enseigne JOUEUR)</div></div>
+    <span id="strat" class="pill">AUTO</span></div>
+    <div class="body">
+      <div class="pred">
+        <div id="ps" class="suit">—</div>
+        <div>
+          <div class="ey">Enseigne prédite</div>
+          <div id="pn" class="pname">En attente</div>
+          <span id="target" class="pill">Cible —</span>
+        </div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span>Taux historique</span><b id="rate">—</b></div>
+        <div class="metric"><span>Marge vs 25%</span><b id="margin" class="green">—</b></div>
+        <div class="metric"><span>Échantillon</span><b id="sample">—</b></div>
+        <div class="metric"><span>Confiance</span><b id="conf">—</b></div>
+      </div>
+      <div id="pnote" class="note" style="display:none"></div>
+    </div>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="panel stat"><span class="ey">Jeux</span><div id="total" class="val">—</div><div class="small">serveur</div></div>
+  <div class="panel stat"><span class="ey">Prédictions</span><div id="preds" class="val">—</div><div class="small">historique</div></div>
+  <div class="panel stat"><span class="ey">Validées</span><div id="valid" class="val green">—</div><div class="small">vert</div></div>
+  <div class="panel stat"><span class="ey">Non validées</span><div id="invalid" class="val redc">—</div><div class="small">rouge</div></div>
+  <div class="panel stat"><span class="ey">Schémas</span><div id="pcount" class="val">—</div><div class="small">récurrents</div></div>
+</section>
+
+<div class="grid">
+  <section class="panel">
+    <div class="head">
+      <div><div class="ey">Mémoire serveur</div><div class="title">Historique de toutes les prédictions</div></div>
+      <button onclick="copyPred()">Copier</button>
+    </div>
+    <div class="tablewrap">
+      <table class="table">
+        <thead><tr>
+          <th>Jeu</th><th>Préd.</th><th>Stratégie</th><th>Taux</th><th>Marge</th><th>Statut</th><th>Réel</th>
+        </tr></thead>
+        <tbody id="hist"><tr><td colspan="7">Chargement…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <div><div class="ey">Exploration</div><div class="title">Schémas fréquemment répétés</div></div>
+      <span class="pill">AUTO</span>
+    </div>
+    <div id="patterns" class="patterns">Analyse…</div>
+    <div class="head">
+      <div><div class="ey">Recalibrage</div><div class="title">Nouvelle collecte → stratégie adaptée</div></div>
+    </div>
+    <div class="actions">
+      <button onclick="collect(8)">Collecter 8</button>
+      <button class="alt" onclick="collect(15)">Collecter 15</button>
+      <button class="alt" onclick="collect(30)">Collecter 30</button>
+      <button class="alt" onclick="full()">Analyse complète</button>
+      <button class="alt" onclick="refreshAll()">Actualiser</button>
+    </div>
+    <div id="out" class="out">La prédiction suivante est enregistrée côté serveur et validée dès que le jeu cible apparaît. Tout est stocké en base (pas de localStorage).</div>
+  </section>
+</div>
+<div class="foot">Prédictions basées sur transitions historiques de l'enseigne JOUEUR. Les taux ne garantissent pas le résultat futur. Focus : 1ère carte joueur. Formats 3-3 signalés.</div>
+</div>
+
+<script>
+const sm={H:'♥',D:'♦',S:'♠',C:'♣'};
+const red=s=>s==='H'||s==='D';
+const tx=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v??'—'};
+const card=(r,s)=>`<div class="card ${red(s)?'red':'black'}"><strong>${r}</strong><small>${sm[s]||s}</small></div>`;
+async function j(u,o){return(await fetch(u,o)).json()}
+
+async function refreshAll(){
+  try{
+    const [l,h,p,st]=await Promise.all([
+      j('/api/live'),
+      j('/api/predictions?limit=200'),
+      j('/api/patterns?limit=20'),
+      j('/api/stats/overview')
+    ]);
+    let x=l.latest;
+    tx('clock',new Date().toLocaleTimeString());
+    if(x){
+      tx('gn','#N'+x.n);
+      document.getElementById('pc').innerHTML=(x.player_suits||'').split(',').filter(Boolean).map((s,i)=>card('P'+(i+1),s)).join('')||'—';
+      document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—';
+      tx('fmt',x.format||((x.player_card_count||'?')+'-'+(x.banker_card_count||'?')));
+      const al=document.getElementById('alert33');
+      if(x.is_33){al.style.display='block'}else{al.style.display='none'}
+    }
+    if(l.prediction){
+      let q=l.prediction;
+      tx('ps',q.symbol);
+      tx('pn',q.symbol+' — '+ (q.suit==='H'?'Cœur':q.suit==='D'?'Carreau':q.suit==='S'?'Pique':'Trèfle'));
+      tx('target','Cible #N'+l.prediction_target_n);
+      tx('strat',q.strategy||'AUTO');
+      tx('rate',q.hit_rate+'%');
+      tx('margin',(q.margin>=0?'+':'')+q.margin+' pts');
+      tx('sample',q.sample);
+      tx('conf',Math.round((q.confidence||0)*100)+'%');
+      const pn=document.getElementById('pnote');
+      if(q.note){pn.style.display='block';pn.textContent=q.note}else{pn.style.display='none'}
+    }
+    const ps=l.pred_stats||{};
+    tx('total',st.total_hands);
+    tx('preds',ps.total||h.length);
+    tx('valid',ps.valid||h.filter(x=>x.status==='VALID').length);
+    tx('invalid',ps.invalid||h.filter(x=>x.status==='INVALID').length);
+    tx('pcount',p.length);
+    document.getElementById('hist').innerHTML=h.map(x=>`<tr>
+      <td>#${x.target_n}</td>
+      <td><b>${sm[x.prediction_suit]||x.prediction_suit}</b></td>
+      <td>${x.strategy||'AUTO'}</td>
+      <td>${x.hit_rate}%</td>
+      <td>${x.margin>=0?'+':''}${x.margin}</td>
+      <td><span class="status ${x.status==='VALID'?'valid':x.status==='INVALID'?'invalid':'pending'}">${x.status}</span></td>
+      <td>${sm[x.actual_first_suit]||'—'}</td>
+    </tr>`).join('')||'<tr><td colspan="7">Aucune prédiction.</td></tr>';
+    document.getElementById('patterns').innerHTML=p.map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">×${x.occurrences}</span></div>`).join('')||'Aucun schéma récurrent.';
+  }catch(e){tx('out','Erreur : '+e)}
+}
+
+async function collect(n){
+  tx('out','Collecte + validation + recalibrage…');
+  try{
+    let d=await j('/api/collect?pages='+n,{method:'POST'});
+    document.getElementById('out').textContent=JSON.stringify(d,null,2);
+    await refreshAll();
+  }catch(e){tx('out','Erreur : '+e)}
+}
+async function full(){
+  let d=await j('/api/analysis/full');
+  document.getElementById('out').textContent=JSON.stringify(d,null,2);
+  await refreshAll();
+}
+async function copyPred(){
+  try{
+    let h=await j('/api/predictions?limit=300');
+    let t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'AUTO'} | ${x.hit_rate}% | marge ${x.margin>=0?'+':''}${x.margin} | ${x.status} | réel ${sm[x.actual_first_suit]||'—'}`).join('\n');
+    await navigator.clipboard.writeText(t||'Aucune prédiction');
+    let b=document.querySelector('button');
+    let old=b.textContent;b.textContent='Copié ✓';
+    setTimeout(()=>b.textContent=old,1300);
+  }catch(e){alert('Copie indisponible sur cet appareil.')}
+}
+refreshAll();
+setInterval(refreshAll,3000);
+</script></body></html>
+"""
+
+# -------------------------------------------------
+# Background auto-collect (optionnel)
+# -------------------------------------------------
+def auto_collect_loop():
+    if AUTO_COLLECT_INTERVAL <= 0:
+        return
+    while True:
+        time.sleep(AUTO_COLLECT_INTERVAL)
+        try:
+            print("[AUTO] Collecte légère…")
+            parsed = collect(pages=4, delay=0.35)
+            new = upsert_hands(parsed)
+            if new:
+                hands = get_all_hands()
+                record_patterns(hands)
+                validate_predictions()
+                report = analyze(hands)
+                pred, latest = pick_best_prediction(hands, report)
+                if pred and latest:
+                    upsert_prediction(
+                        latest["n"] + 1, pred, latest["n"],
+                        latest.get("player_first_suit"), pred.get("note"),
+                    )
+                print(f"[AUTO] +{new} nouvelles mains — prédiction mise à jour")
+        except Exception as e:
+            print(f"[AUTO] Erreur: {e}")
+
+# -------------------------------------------------
 # Main
+# -------------------------------------------------
 if __name__ == "__main__":
     init_db()
     print(f"DB initialisée : {DB_PATH}")
     print(f"Démarrage du serveur sur http://0.0.0.0:{PORT}")
     print("Ouvre http://localhost:8000 dans ton navigateur")
+    if AUTO_COLLECT_INTERVAL > 0:
+        t = threading.Thread(target=auto_collect_loop, daemon=True)
+        t.start()
+        print(f"Auto-collect activé toutes les {AUTO_COLLECT_INTERVAL}s")
     try:
         server = HTTPServer(("0.0.0.0", PORT), Handler)
         server.serve_forever()
