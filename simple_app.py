@@ -705,169 +705,345 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "Not found"}, 404)
 
-DASHBOARD = r"""<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Xcode Suit Card — Live</title><style>
-:root{--bg:#050b14;--p:#0d1c2e;--p2:#091625;--l:#213b58;--t:#f4f7fb;--m:#8fa7bf;--b:#4f8cff;--g:#22d39b;--r:#ff5876;--y:#f6c653}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#143452,#050b14 42%);color:var(--t);font-family:Inter,system-ui,sans-serif}
-.shell{max-width:1400px;margin:auto;padding:22px}
-.top,.head,.row{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.top{margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}
-.logo{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#4f8cff,#7b5cff);font-size:25px}
-h1{margin:0;font-size:clamp(1.3rem,3vw,2rem)}.sub{margin:4px 0 0;color:var(--m);font-size:.8rem}
-.live,.pill{border-radius:999px;padding:7px 10px;font-size:.68rem;font-weight:850}
-.live{color:#8ef0d3;background:#08231f;border:1px solid #1c4c42}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--g);margin-right:6px;animation:pulse 1.5s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.hero,.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:15px}
-.panel{background:linear-gradient(180deg,#10243a,#091725);border:1px solid var(--l);border-radius:18px;overflow:hidden;box-shadow:0 16px 45px #0005}
-.head{padding:15px 18px;border-bottom:1px solid var(--l)}
-.ey{color:var(--m);font-size:.62rem;text-transform:uppercase;letter-spacing:.13em}
-.title{font-weight:850;margin-top:3px}.body{padding:18px}
-.livegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.box{background:#06111d88;border:1px solid var(--l);border-radius:14px;padding:15px}
-.num{font-size:1.9rem;font-weight:950;margin:4px 0 12px}
-.cards{display:flex;gap:7px;flex-wrap:wrap}
-.card{width:53px;height:66px;border-radius:10px;background:#f8fafc;color:#101827;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900}
-.card small{font-size:1.1rem}.red{color:#e11d48}
-.pred{display:flex;align-items:center;gap:13px}.suit{font-size:4.2rem}
-.pname{font-size:1.35rem;font-weight:950}
-.metrics,.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
-.metrics{margin-top:16px}
-.metric,.stat{background:var(--p2);border-radius:11px;padding:10px}
-.metric span,.small{display:block;color:var(--m);font-size:.61rem;text-transform:uppercase}
-.metric b{font-size:1.02rem}.green{color:var(--g)}.yellow{color:var(--y)}.redc{color:var(--r)}
-.stats{grid-template-columns:repeat(5,1fr);margin:15px 0}.stat{padding:15px}
-.val{font-size:1.3rem;font-weight:950;margin-top:4px}
-.grid{margin-top:15px}
-.tablewrap{max-height:480px;overflow:auto}
+DASHBOARD = r"""<!doctype html><html lang="fr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xcode Suit Card — Live</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Rajdhani:wght@400;600;700&family=Courier+Prime:wght@400;700&display=swap');
+:root{
+  --black:#0c0608;--deep:#140a0e;--card:#1a0e12;--bordeaux:#6b1a2a;--crimson:#8b2240;
+  --gold:#d4a84b;--gold-dim:#a07830;--ivory:#f0e6d0;--muted:#a89878;
+  --ok:#5ecf9a;--bad:#e07080;--border:#3a2028;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:radial-gradient(ellipse at 20% 0%,#2a1018 0%,#0c0608 55%);color:var(--ivory);font-family:'Rajdhani',system-ui,sans-serif;min-height:100vh}
+.shell{max-width:1100px;margin:auto;padding:22px 16px 50px}
+header{text-align:center;padding:28px 12px 18px;border-bottom:1px solid var(--border);margin-bottom:20px}
+header::after{content:'';display:block;width:140px;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent);margin:12px auto 0}
+.suits{font-size:1.2rem;color:var(--gold-dim);letter-spacing:.3em}
+h1{font-family:'Cinzel',serif;font-size:clamp(1.4rem,4vw,2rem);font-weight:900;color:var(--gold);letter-spacing:.12em;margin:8px 0 4px}
+.sub{font-size:.75rem;letter-spacing:.2em;color:var(--muted);text-transform:uppercase}
+.author{font-size:.68rem;color:var(--gold-dim);margin-top:4px;letter-spacing:.15em}
+
+.panel{background:var(--card);border:1px solid var(--border);border-radius:6px;margin-bottom:18px;position:relative;overflow:hidden}
+.panel.gold-top{border-top:2px solid var(--gold)}
+.panel .ph{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.panel .pb{padding:16px}
+.ey{font-family:'Cinzel',serif;font-size:.62rem;letter-spacing:.2em;color:var(--gold);text-transform:uppercase}
+.title{font-weight:700;font-size:.95rem;margin-top:2px}
+.pill{border-radius:999px;padding:5px 10px;font-size:.68rem;font-weight:700;border:1px solid var(--gold-dim);color:var(--gold);background:#1a1008}
+.live-pill{color:#8fd6b3;border-color:#2a5a40;background:#0c1810}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px;animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:14px}
+@media(max-width:800px){.hero{grid-template-columns:1fr}}
+.livegrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.box{background:#12080c;border:1px solid var(--border);border-radius:5px;padding:14px}
+.num{font-family:'Cinzel',serif;font-size:1.7rem;font-weight:900;color:var(--gold);margin:6px 0 10px}
+.cards{display:flex;gap:6px;flex-wrap:wrap}
+.card{width:48px;height:62px;border-radius:8px;background:#f5f0e6;color:#1a1010;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;font-size:.85rem}
+.card small{font-size:1rem}.card.red{color:#b82030}
+.pred-row{display:flex;align-items:center;gap:14px;margin-bottom:12px}
+.suit-big{font-size:4rem;line-height:1}
+.pname{font-family:'Cinzel',serif;font-size:1.25rem;font-weight:900;color:var(--gold)}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{background:#12080c;border-radius:5px;padding:10px;border:1px solid var(--border)}
+.metric span{display:block;font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.metric b{font-size:1rem;color:var(--ivory)}
+.note{margin-top:10px;padding:8px 12px;border-radius:4px;background:#2a1410;border:1px solid #6a3a20;color:#e0a870;font-size:.78rem;display:none}
+
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:18px}
+@media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px;text-align:center}
+.stat .ey{display:block;margin-bottom:4px}
+.stat .val{font-family:'Cinzel',serif;font-size:1.35rem;font-weight:900;color:var(--gold)}
+.stat .val.ok{color:var(--ok)}.stat .val.bad{color:var(--bad)}
+.stat .small{font-size:.65rem;color:var(--muted);margin-top:2px}
+
+/* LIVE controls */
+.btn-demarrer{
+  width:100%;padding:16px;border-radius:6px;cursor:pointer;
+  background:linear-gradient(180deg,#8b2240,#5a1228);border:2px solid var(--gold);color:var(--gold);
+  font-family:'Cinzel',serif;font-size:1rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  box-shadow:0 0 22px rgba(212,168,75,.22);transition:.12s;
+}
+.btn-demarrer:hover{box-shadow:0 0 30px rgba(212,168,75,.4);transform:translateY(-1px)}
+.btn-demarrer.off{background:linear-gradient(180deg,#2a1212,#1a0a0c);border-color:#6a3038;color:#c09090;box-shadow:none}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+button.act{
+  border:1px solid var(--gold-dim);background:#1a1010;color:var(--gold);padding:9px 12px;border-radius:4px;
+  font-family:'Cinzel',serif;font-size:.72rem;letter-spacing:.1em;cursor:pointer;text-transform:uppercase;
+}
+button.act:hover{background:#2a1810;border-color:var(--gold)}
+button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:var(--gold)}
+.live-status{margin-top:10px;padding:10px 12px;background:#12080c;border:1px solid var(--border);border-radius:4px;font-size:.84rem;color:var(--ivory);min-height:1.4em}
+.demarrer-desc{font-size:.72rem;color:var(--muted);text-align:center;margin-top:8px;line-height:1.5}
+
+/* Live table */
+.live-table-wrap{margin-top:14px;border:1px solid var(--border);border-radius:5px;overflow:hidden;background:#12080c}
+.live-table-head{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:linear-gradient(180deg,#2a1218,#1a0c10);border-bottom:1px solid var(--border)}
+.live-table-title{font-family:'Cinzel',serif;font-size:.7rem;letter-spacing:.14em;color:var(--gold)}
+.live-table-badge{font-size:.62rem;padding:3px 8px;border-radius:999px;border:1px solid var(--gold-dim);color:var(--gold)}
+.live-table-scroll{max-height:300px;overflow:auto}
+.live-table{width:100%;border-collapse:collapse;font-size:.78rem;font-family:'Courier Prime',monospace}
+.live-table th{position:sticky;top:0;background:#1a0e12;color:var(--gold-dim);text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);font-family:'Rajdhani',sans-serif;font-size:.62rem;letter-spacing:.08em;text-transform:uppercase}
+.live-table td{padding:8px 10px;border-bottom:1px solid #2a181c}
+.live-table tr:hover td{background:#1e1014}
+.live-table tr.now td{background:#2a1810;border-left:3px solid var(--gold)}
+.lt-num{color:var(--gold);font-weight:700}
+.lt-ok{color:var(--ok);font-weight:700}.lt-ko{color:var(--bad);font-weight:700}.lt-pend{color:var(--gold-dim)}
+
+.grid2{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+.tablewrap{max-height:420px;overflow:auto}
 .table{width:100%;border-collapse:collapse;font-size:.75rem}
-.table th,.table td{padding:9px 11px;border-bottom:1px solid #193149;text-align:left;white-space:nowrap}
-.table th{position:sticky;top:0;background:#0d2034;color:var(--m);font-size:.6rem}
-.status{padding:4px 7px;border-radius:999px;font-weight:900}
-.valid{background:#21d39b22;color:#67efc2}.invalid{background:#ff587622;color:#ff8aa0}.pending{background:#f6c65322;color:#ffd976}
-.actions{display:flex;gap:8px;flex-wrap:wrap;padding:14px 18px}
-button{border:0;border-radius:9px;padding:9px 12px;color:#fff;background:var(--b);font-weight:800;cursor:pointer}
-button.alt{background:#17334f;border:1px solid var(--l)}
-.patterns{padding:8px 18px 15px;max-height:220px;overflow:auto}
-.pattern{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #193149}
-.count{color:var(--y);font-weight:900}
-.out{padding:14px 18px;min-height:60px;color:#b9c9da;font:11px ui-monospace,monospace;white-space:pre-wrap}
-.note{margin-top:10px;padding:8px 12px;border-radius:8px;background:#3a1a0a;border:1px solid #8b4513;color:#ffb070;font-size:.78rem}
-.foot{text-align:center;color:#637c96;font-size:.67rem;padding:18px}
-@media(max-width:900px){.hero,.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:600px){.shell{padding:12px}.top{align-items:flex-start}.livegrid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.stats .stat:last-child{grid-column:1/-1}}
-</style></head><body><div class="shell">
-<header class="top">
-  <div class="brand"><div class="logo">♠</div>
-    <div><h1>Xcode Suit Card</h1>
-    <div class="sub">Prédiction consécutive • enseigne JOUEUR • mémoire serveur</div></div>
-  </div>
-  <div class="live"><span class="dot"></span>LIVE • 3s</div>
+.table th,.table td{padding:8px 10px;border-bottom:1px solid #2a181c;text-align:left;white-space:nowrap}
+.table th{position:sticky;top:0;background:#1a0e12;color:var(--muted);font-size:.6rem;letter-spacing:.06em}
+.status{padding:3px 7px;border-radius:999px;font-weight:800;font-size:.68rem}
+.valid{background:#1a2a18;color:var(--ok)}.invalid{background:#2a1218;color:var(--bad)}.pending{background:#2a2010;color:var(--gold)}
+.patterns{max-height:200px;overflow:auto}
+.pattern{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #2a181c;font-family:'Courier Prime',monospace;font-size:.78rem}
+.count{color:var(--gold);font-weight:700}
+.out{margin-top:10px;padding:10px;background:#12080c;border:1px solid var(--border);border-radius:4px;font:11px 'Courier Prime',monospace;color:var(--muted);white-space:pre-wrap;min-height:48px}
+.foot{text-align:center;color:#5a4048;font-size:.65rem;padding:18px 8px;letter-spacing:.08em}
+</style></head><body>
+<div class="shell">
+<header>
+  <div class="suits">♠️ ♥️ ♣️ ♦️</div>
+  <h1>XCODE SUIT CARD</h1>
+  <div class="sub">Prédiction enseigne JOUEUR · transitions · mémoire serveur</div>
+  <div class="author">CANAL @statistika_baccara · STOCKAGE SERVEUR</div>
 </header>
 
+<!-- LIVE -->
+<section class="panel gold-top">
+  <div class="ph">
+    <div><div class="ey">Connexion Telegram</div><div class="title">Flux live · @statistika_baccara</div></div>
+    <span class="pill live-pill" id="live-badge"><span class="dot"></span>OFF</span>
+  </div>
+  <div class="pb">
+    <button class="btn-demarrer off" id="btn-live" onclick="toggleLive()">🔴 DÉMARRER LIVE</button>
+    <div class="demarrer-desc">
+      Scan auto toutes les <b style="color:var(--gold)">8 s</b> · collecte légère + validation + nouvelle prédiction.<br>
+      Focus : <b style="color:var(--gold)">1ʳᵉ carte JOUEUR</b> · formats 2-2 / 3-3 signalés.
+    </div>
+    <div class="live-status" id="live-status">LIVE arrêté — cliquez DÉMARRER LIVE pour synchroniser.</div>
+    <div class="btn-row">
+      <button class="act pri" onclick="collect(8)">Collecter 8</button>
+      <button class="act" onclick="collect(15)">Collecter 15</button>
+      <button class="act" onclick="collect(30)">Collecter 30</button>
+      <button class="act" onclick="full()">Analyse</button>
+      <button class="act" onclick="refreshAll()">Actualiser</button>
+    </div>
+
+    <div class="live-table-wrap">
+      <div class="live-table-head">
+        <span class="live-table-title">◆ SUIVI LIVE DES JEUX ◆</span>
+        <span class="live-table-badge" id="lt-count">0</span>
+      </div>
+      <div class="live-table-scroll">
+        <table class="live-table">
+          <thead><tr><th>Jeu</th><th>P1</th><th>P2</th><th>Format</th><th>Préd.</th><th>Statut</th></tr></thead>
+          <tbody id="lt-body"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">En attente…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- HERO: dernier jeu + prédiction -->
 <section class="hero">
-  <div class="panel">
-    <div class="head"><div><div class="ey">Flux TG</div><div class="title">Dernier jeu reçu</div></div>
-    <span id="clock" class="pill">—</span></div>
-    <div class="body">
+  <div class="panel gold-top">
+    <div class="ph">
+      <div><div class="ey">Dernier jeu</div><div class="title">Flux reçu</div></div>
+      <span class="pill" id="clock">—</span>
+    </div>
+    <div class="pb">
       <div class="livegrid">
-        <div class="box"><div class="ey">PLAYER</div><div id="gn" class="num">—</div>
-          <div id="pc" class="cards">—</div>
+        <div class="box">
+          <div class="ey">PLAYER</div>
+          <div class="num" id="gn">—</div>
+          <div class="cards" id="pc">—</div>
           <div style="margin-top:10px" class="ey">Format</div><b id="fmt">—</b>
         </div>
-        <div class="box"><div class="ey">BANKER</div>
-          <div id="bc" class="cards" style="margin-top:8px">—</div>
-          <div style="margin-top:14px" class="ey">Cadence</div><b>1 jeu ≈ 60 min</b>
+        <div class="box">
+          <div class="ey">BANKER</div>
+          <div class="cards" id="bc" style="margin-top:8px">—</div>
+          <div style="margin-top:12px" class="ey">Cadence</div><b>≈ 60 min / jeu</b>
         </div>
       </div>
-      <div id="alert33" class="note" style="display:none">⚠ Main 3-3 détectée — possible signal de changement d'algorithme. Vigilance accrue.</div>
+      <div class="note" id="alert33">⚠ Main 3-3 — possible signal de changement d'algo.</div>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="head"><div><div class="ey">Décision automatique</div><div class="title">Prochain jeu (enseigne JOUEUR)</div></div>
-    <span id="strat" class="pill">AUTO</span></div>
-    <div class="body">
-      <div class="pred">
-        <div id="ps" class="suit">—</div>
+  <div class="panel gold-top">
+    <div class="ph">
+      <div><div class="ey">Décision auto</div><div class="title">Prochain jeu · enseigne JOUEUR</div></div>
+      <span class="pill" id="strat">AUTO</span>
+    </div>
+    <div class="pb">
+      <div class="pred-row">
+        <div class="suit-big" id="ps">—</div>
         <div>
           <div class="ey">Enseigne prédite</div>
-          <div id="pn" class="pname">En attente</div>
-          <span id="target" class="pill">Cible —</span>
+          <div class="pname" id="pn">En attente</div>
+          <span class="pill" id="target">Cible —</span>
         </div>
       </div>
       <div class="metrics">
-        <div class="metric"><span>Taux historique</span><b id="rate">—</b></div>
-        <div class="metric"><span>Marge vs 25%</span><b id="margin" class="green">—</b></div>
+        <div class="metric"><span>Taux histo</span><b id="rate">—</b></div>
+        <div class="metric"><span>Marge vs 25%</span><b id="margin">—</b></div>
         <div class="metric"><span>Échantillon</span><b id="sample">—</b></div>
         <div class="metric"><span>Confiance</span><b id="conf">—</b></div>
       </div>
-      <div id="pnote" class="note" style="display:none"></div>
+      <div class="note" id="pnote"></div>
     </div>
   </div>
 </section>
 
 <section class="stats">
-  <div class="panel stat"><span class="ey">Jeux</span><div id="total" class="val">—</div><div class="small">serveur</div></div>
-  <div class="panel stat"><span class="ey">Prédictions</span><div id="preds" class="val">—</div><div class="small">historique</div></div>
-  <div class="panel stat"><span class="ey">Validées</span><div id="valid" class="val green">—</div><div class="small">vert</div></div>
-  <div class="panel stat"><span class="ey">Non validées</span><div id="invalid" class="val redc">—</div><div class="small">rouge</div></div>
-  <div class="panel stat"><span class="ey">Schémas</span><div id="pcount" class="val">—</div><div class="small">récurrents</div></div>
+  <div class="stat"><span class="ey">Jeux</span><div class="val" id="total">—</div><div class="small">serveur</div></div>
+  <div class="stat"><span class="ey">Prédictions</span><div class="val" id="preds">—</div><div class="small">historique</div></div>
+  <div class="stat"><span class="ey">Validées</span><div class="val ok" id="valid">—</div><div class="small">vert</div></div>
+  <div class="stat"><span class="ey">Invalidées</span><div class="val bad" id="invalid">—</div><div class="small">rouge</div></div>
+  <div class="stat"><span class="ey">Schémas</span><div class="val" id="pcount">—</div><div class="small">récurrents</div></div>
 </section>
 
-<div class="grid">
-  <section class="panel">
-    <div class="head">
-      <div><div class="ey">Mémoire serveur</div><div class="title">Historique de toutes les prédictions</div></div>
-      <button onclick="copyPred()">Copier</button>
+<div class="grid2">
+  <section class="panel gold-top">
+    <div class="ph">
+      <div><div class="ey">Mémoire serveur</div><div class="title">Historique des prédictions</div></div>
+      <button class="act" onclick="copyPred()">⧉ Copier</button>
     </div>
     <div class="tablewrap">
       <table class="table">
-        <thead><tr>
-          <th>Jeu</th><th>Préd.</th><th>Stratégie</th><th>Taux</th><th>Marge</th><th>Statut</th><th>Réel</th>
-        </tr></thead>
+        <thead><tr><th>Jeu</th><th>Préd.</th><th>Stratégie</th><th>Taux</th><th>Marge</th><th>Statut</th><th>Réel</th></tr></thead>
         <tbody id="hist"><tr><td colspan="7">Chargement…</td></tr></tbody>
       </table>
     </div>
   </section>
 
-  <section class="panel">
-    <div class="head">
-      <div><div class="ey">Exploration</div><div class="title">Schémas fréquemment répétés</div></div>
+  <section class="panel gold-top">
+    <div class="ph">
+      <div><div class="ey">Exploration</div><div class="title">Schémas récurrents</div></div>
       <span class="pill">AUTO</span>
     </div>
-    <div id="patterns" class="patterns">Analyse…</div>
-    <div class="head">
-      <div><div class="ey">Recalibrage</div><div class="title">Nouvelle collecte → stratégie adaptée</div></div>
+    <div class="pb">
+      <div class="patterns" id="patterns">Analyse…</div>
+      <div class="out" id="out">Prédictions stockées côté serveur. Validation auto dès que le jeu cible arrive.</div>
     </div>
-    <div class="actions">
-      <button onclick="collect(8)">Collecter 8</button>
-      <button class="alt" onclick="collect(15)">Collecter 15</button>
-      <button class="alt" onclick="collect(30)">Collecter 30</button>
-      <button class="alt" onclick="full()">Analyse complète</button>
-      <button class="alt" onclick="refreshAll()">Actualiser</button>
-    </div>
-    <div id="out" class="out">La prédiction suivante est enregistrée côté serveur et validée dès que le jeu cible apparaît. Tout est stocké en base (pas de localStorage).</div>
   </section>
 </div>
-<div class="foot">Prédictions basées sur transitions historiques de l'enseigne JOUEUR. Les taux ne garantissent pas le résultat futur. Focus : 1ère carte joueur. Formats 3-3 signalés.</div>
+
+<div class="foot">Xcode Suit Card · transitions historiques enseigne JOUEUR · pas de localStorage · taux non garantis</div>
 </div>
 
 <script>
 const sm={H:'♥',D:'♦',S:'♠',C:'♣'};
+const sn={H:'Cœur',D:'Carreau',S:'Pique',C:'Trèfle'};
 const red=s=>s==='H'||s==='D';
 const tx=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v??'—'};
-const card=(r,s)=>`<div class="card ${red(s)?'red':'black'}"><strong>${r}</strong><small>${sm[s]||s}</small></div>`;
+const card=(lab,s)=>`<div class="card ${red(s)?'red':''}"><strong>${lab}</strong><small>${sm[s]||s}</small></div>`;
 async function j(u,o){return(await fetch(u,o)).json()}
+
+let liveOn=false, liveTimer=null, liveBusy=false;
+
+function setLiveUI(on){
+  const btn=document.getElementById('btn-live');
+  const badge=document.getElementById('live-badge');
+  if(on){
+    btn.textContent='🟢 LIVE AUTO ACTIF';
+    btn.classList.remove('off');
+    badge.innerHTML='<span class="dot"></span>LIVE';
+  }else{
+    btn.textContent='🔴 DÉMARRER LIVE';
+    btn.classList.add('off');
+    badge.innerHTML='OFF';
+  }
+}
+
+function toggleLive(){
+  if(liveOn){
+    liveOn=false;
+    if(liveTimer){clearInterval(liveTimer);liveTimer=null}
+    setLiveUI(false);
+    tx('live-status','LIVE arrêté.');
+    return;
+  }
+  liveOn=true;
+  setLiveUI(true);
+  tx('live-status','🟢 LIVE démarré — première collecte…');
+  runLiveTick();
+  liveTimer=setInterval(runLiveTick,8000);
+}
+
+async function runLiveTick(){
+  if(liveBusy) return;
+  liveBusy=true;
+  try{
+    tx('live-status','⟳ Collecte + recalibrage…');
+    const d=await j('/api/collect?pages=4',{method:'POST'});
+    await refreshAll();
+    const msg=d.status==='ok'
+      ? `✅ +${d.hands_new||0} nouvelles · ${d.hands_found||0} trouvées · stratégie à jour`
+      : ('✕ '+(d.error||'erreur'));
+    tx('live-status',msg);
+  }catch(e){
+    tx('live-status','✕ '+e.message);
+  }finally{
+    liveBusy=false;
+  }
+}
+
+function fillLiveTable(hands, preds){
+  const tbody=document.getElementById('lt-body');
+  const cnt=document.getElementById('lt-count');
+  if(!tbody) return;
+  const predMap={};
+  (preds||[]).forEach(p=>{predMap[p.target_n]=p});
+  const rows=(hands||[]).slice().sort((a,b)=>b.n-a.n).slice(0,25);
+  if(!rows.length){
+    tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px">Aucune main — collectez ou démarrez LIVE.</td></tr>';
+    if(cnt) cnt.textContent='0';
+    return;
+  }
+  const latest=rows[0]&&rows[0].n;
+  tbody.innerHTML=rows.map(h=>{
+    const pSuits=(h.player_suits||'').split(',').filter(Boolean);
+    const bSuits=(h.banker_suits||'').split(',').filter(Boolean);
+    const fmt=h.format||((pSuits.length||'?')+'-'+(bSuits.length||'?'));
+    const pred=predMap[h.n];
+    let st='—', stCl='lt-pend', predSym='—';
+    if(pred){
+      predSym=sm[pred.prediction_suit]||pred.prediction_suit;
+      if(pred.status==='VALID'){st='✅';stCl='lt-ok'}
+      else if(pred.status==='INVALID'){st='❌';stCl='lt-ko'}
+      else{st='⏳';stCl='lt-pend'}
+    }
+    const p1=pSuits.map(s=>sm[s]||s).join(' ')||'—';
+    const p2=bSuits.map(s=>sm[s]||s).join(' ')||'—';
+    return `<tr class="${h.n===latest?'now':''}">
+      <td class="lt-num">#N${h.n}</td>
+      <td>${p1}</td><td>${p2}</td>
+      <td>${fmt}</td>
+      <td>${predSym}</td>
+      <td class="${stCl}">${st}</td>
+    </tr>`;
+  }).join('');
+  if(cnt) cnt.textContent=rows.length+' jeux';
+}
 
 async function refreshAll(){
   try{
-    const [l,h,p,st]=await Promise.all([
+    const [l,h,p,st,hands]=await Promise.all([
       j('/api/live'),
       j('/api/predictions?limit=200'),
       j('/api/patterns?limit=20'),
-      j('/api/stats/overview')
+      j('/api/stats/overview'),
+      j('/api/hands?limit=30')
     ]);
-    let x=l.latest;
+    const x=l.latest;
     tx('clock',new Date().toLocaleTimeString());
     if(x){
       tx('gn','#N'+x.n);
@@ -875,12 +1051,12 @@ async function refreshAll(){
       document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—';
       tx('fmt',x.format||((x.player_card_count||'?')+'-'+(x.banker_card_count||'?')));
       const al=document.getElementById('alert33');
-      if(x.is_33){al.style.display='block'}else{al.style.display='none'}
+      if(al) al.style.display=x.is_33?'block':'none';
     }
     if(l.prediction){
-      let q=l.prediction;
+      const q=l.prediction;
       tx('ps',q.symbol);
-      tx('pn',q.symbol+' — '+ (q.suit==='H'?'Cœur':q.suit==='D'?'Carreau':q.suit==='S'?'Pique':'Trèfle'));
+      tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||q.suit||''));
       tx('target','Cible #N'+l.prediction_target_n);
       tx('strat',q.strategy||'AUTO');
       tx('rate',q.hit_rate+'%');
@@ -905,35 +1081,42 @@ async function refreshAll(){
       <td><span class="status ${x.status==='VALID'?'valid':x.status==='INVALID'?'invalid':'pending'}">${x.status}</span></td>
       <td>${sm[x.actual_first_suit]||'—'}</td>
     </tr>`).join('')||'<tr><td colspan="7">Aucune prédiction.</td></tr>';
-    document.getElementById('patterns').innerHTML=p.map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">×${x.occurrences}</span></div>`).join('')||'Aucun schéma récurrent.';
+    document.getElementById('patterns').innerHTML=p.map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">×${x.occurrences}</span></div>`).join('')||'Aucun schéma.';
+    fillLiveTable(hands, h);
   }catch(e){tx('out','Erreur : '+e)}
 }
 
 async function collect(n){
   tx('out','Collecte + validation + recalibrage…');
   try{
-    let d=await j('/api/collect?pages='+n,{method:'POST'});
+    const d=await j('/api/collect?pages='+n,{method:'POST'});
     document.getElementById('out').textContent=JSON.stringify(d,null,2);
     await refreshAll();
   }catch(e){tx('out','Erreur : '+e)}
 }
 async function full(){
-  let d=await j('/api/analysis/full');
+  const d=await j('/api/analysis/full');
   document.getElementById('out').textContent=JSON.stringify(d,null,2);
   await refreshAll();
 }
 async function copyPred(){
   try{
-    let h=await j('/api/predictions?limit=300');
-    let t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'AUTO'} | ${x.hit_rate}% | marge ${x.margin>=0?'+':''}${x.margin} | ${x.status} | réel ${sm[x.actual_first_suit]||'—'}`).join('\n');
+    const h=await j('/api/predictions?limit=300');
+    const t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'AUTO'} | ${x.hit_rate}% | marge ${x.margin>=0?'+':''}${x.margin} | ${x.status} | reel ${sm[x.actual_first_suit]||'-'}`).join('
+');
+    await navigator.clipboard.writeText(t||'Aucune prediction');
+    const b=document.querySelector('button.act');
+    if(b){const o=b.textContent;b.textContent='Copie OK';setTimeout(()=>b.textContent=o,1200)}
+  }catch(e){alert('Copie indisponible')}
+} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'AUTO'} | ${x.hit_rate}% | marge ${x.margin>=0?'+':''}${x.margin} | ${x.status} | réel ${sm[x.actual_first_suit]||'—'}`).join('\n');
     await navigator.clipboard.writeText(t||'Aucune prédiction');
-    let b=document.querySelector('button');
-    let old=b.textContent;b.textContent='Copié ✓';
-    setTimeout(()=>b.textContent=old,1300);
-  }catch(e){alert('Copie indisponible sur cet appareil.')}
+    const b=document.querySelector('button.act');
+    if(b){const o=b.textContent;b.textContent='Copié ✓';setTimeout(()=>b.textContent=o,1200)}
+  }catch(e){alert('Copie indisponible')}
 }
+
 refreshAll();
-setInterval(refreshAll,3000);
+setInterval(refreshAll,4000);
 </script></body></html>
 """
 
