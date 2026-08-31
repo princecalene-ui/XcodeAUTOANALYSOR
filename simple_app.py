@@ -257,15 +257,31 @@ def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None)
          prediction.get("confidence",0),prediction.get("hit_rate",0),prediction.get("margin",0),basis_n,basis_first_suit,prediction.get("note")))
     c.commit(); c.close()
 
-def validate_predictions():
+def validate_predictions(recheck_all=False):
+    """
+    Gagnant si l'enseigne predite apparait PARMI les cartes JOUEUR (2 ou 3),
+    pas seulement en premiere position.
+    """
     c=get_conn()
-    rows=c.execute("""SELECT p.id,p.prediction_suit,h.player_first_suit FROM predictions p
-        JOIN hands h ON h.n=p.target_n WHERE p.status='PENDING'""").fetchall()
+    if recheck_all:
+        rows=c.execute("""SELECT p.id,p.prediction_suit,h.player_first_suit,h.player_suits
+            FROM predictions p JOIN hands h ON h.n=p.target_n
+            WHERE p.status IN ('PENDING','VALID','INVALID')""").fetchall()
+    else:
+        rows=c.execute("""SELECT p.id,p.prediction_suit,h.player_first_suit,h.player_suits
+            FROM predictions p JOIN hands h ON h.n=p.target_n
+            WHERE p.status='PENDING'""").fetchall()
     n=0
     for r in rows:
-        st="VALID" if r["player_first_suit"]==r["prediction_suit"] else "INVALID"
+        suits=(r["player_suits"] or "").split(",")
+        suits=[s.strip() for s in suits if s.strip()]
+        hit = r["prediction_suit"] in suits  # n'importe quelle carte joueur
+        st="VALID" if hit else "INVALID"
+        # actual = toutes les enseignes joueur (pour l'historique)
+        actual = r["player_suits"] or r["player_first_suit"]
         c.execute("UPDATE predictions SET status=?,actual_first_suit=?,validated_at=? WHERE id=?",
-                  (st,r["player_first_suit"],datetime.utcnow().isoformat(),r["id"])); n+=1
+                  (st, actual, datetime.utcnow().isoformat(), r["id"]))
+        n+=1
     c.commit(); c.close(); return n
 
 def get_prediction_history(limit=200):
@@ -294,9 +310,9 @@ def get_patterns(limit=20):
     rows=c.execute("SELECT pattern,occurrences,last_seen_n,context FROM pattern_observations ORDER BY occurrences DESC,last_seen_n DESC LIMIT ?",(int(limit),)).fetchall()
     c.close(); return [dict(r) for r in rows]
 
-def run_learning_cycle():
+def run_learning_cycle(recheck=False):
     hands=get_all_hands()
-    validated=validate_predictions()
+    validated=validate_predictions(recheck_all=recheck)
     score_strategies_from_validations()
     deactivated=prune_bad_strategies()
     created=rebuild_strategies(hands)
@@ -395,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
                     "message":f"{new} nouvelles · apprentissage maj","learning":cycle,"next_prediction":cycle.get("prediction")})
             except Exception as e: self.send_json({"status":"error","error":str(e)},500)
         elif path=="/api/learn":
-            self.send_json({"status":"ok","learning":run_learning_cycle()})
+            self.send_json({"status":"ok","learning":run_learning_cycle(recheck=True)})
         else: self.send_json({"error":"Not found"},404)
 
 DASHBOARD = r"""<!doctype html><html lang="fr"><head>
@@ -572,7 +588,7 @@ tx('sactive',st.strategies_active!=null?st.strategies_active:(stR.active||[]).le
 document.getElementById('hist').innerHTML=h.map(x=>`<tr><td>#${x.target_n}</td><td><b>${sm[x.prediction_suit]||x.prediction_suit}</b></td>
 <td>${x.strategy||'—'}</td><td>${x.hit_rate}%</td>
 <td><span class="status ${x.status==='VALID'?'valid':x.status==='INVALID'?'invalid':'pending'}">${x.status}</span></td>
-<td>${sm[x.actual_first_suit]||'—'}</td></tr>`).join('')||'<tr><td colspan="6">Vide</td></tr>';
+<td>${(x.actual_first_suit||'').split(',').filter(Boolean).map(s=>sm[s]||s).join(' ')||'—'}</td></tr>`).join('')||'<tr><td colspan="6">Vide</td></tr>';
 const allS=(stR.all||stR.active||[]);
 document.getElementById('strats').innerHTML=allS.slice(0,12).map(s=>{const rate=s.real_total>=8?s.real_rate:s.hist_rate;
 return `<div class="strat-item"><span class="${s.is_active?'':'off'}">${s.name}</span><span>${s.is_active?'✓ '+rate+'%':'✗ coupe'}</span></div>`}).join('')||'—';
@@ -583,7 +599,7 @@ if(l.learning&&l.learning.diagnosis)tx('out','Diag: '+l.learning.diagnosis);
 async function collect(n){tx('out','Collecte…');try{const d=await j('/api/collect?pages='+n,{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
 async function learn(){tx('out','Learn…');try{const d=await j('/api/learn',{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
 async function copyPred(){try{const h=await j('/api/predictions?limit=300');
-const t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'-'} | ${x.hit_rate}% | ${x.status} | ${sm[x.actual_first_suit]||'-'}`).join('\n');
+const t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'-'} | ${x.hit_rate}% | ${x.status} | ${(x.actual_first_suit||'').split(',').map(s=>sm[s]||s).filter(Boolean).join(' ')||'-'}`).join('\n');
 await navigator.clipboard.writeText(t||'Vide')}catch(e){alert('Copie KO')}}
 refreshAll();setInterval(refreshAll,5000);
 </script></body></html>
