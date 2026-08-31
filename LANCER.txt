@@ -1,0 +1,48 @@
+========================================
+  Xcode SUIT CARD STRATÉGIE CREATOR
+  Comment lancer le site
+========================================
+
+PRÉREQUIS
+---------
+- Python 3.9 ou plus récent
+- Les packages : requests et beautifulsoup4
+
+  Installation des packages (une seule fois) :
+  pip install requests beautifulsoup4
+
+LANCER LE SITE
+--------------
+1. Ouvre un terminal
+2. Va dans le dossier backend :
+
+   cd backend
+
+3. Lance le serveur :
+
+   python simple_app.py
+
+   (ou : python3 simple_app.py)
+
+4. Ouvre ton navigateur à l'adresse :
+
+   http://localhost:8000
+
+UTILISATION
+-----------
+- Bouton « Collecter 10 pages »  → récupère les mains récentes
+- Bouton « Collecter 25 pages »  → charge plus d'historique
+- Bouton « Lancer l'analyse »    → génère les stratégies
+- Bouton « Voir stratégies »     → JSON des règles détectées
+
+Les données s'accumulent dans data/baccarat.db
+Plus tu collectes, plus le système s'auto-renforce.
+
+ARRÊTER LE SERVEUR
+------------------
+Ctrl + C dans le terminal
+
+SUPPORT
+-------
+Canal source : https://t.me/statistika_baccara
+========================================
