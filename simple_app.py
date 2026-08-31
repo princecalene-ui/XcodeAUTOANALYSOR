@@ -386,6 +386,46 @@ class Handler(BaseHTTPRequestHandler):
                 "strategies": report.get("strategies", []),
             })
 
+        elif path == "/api/live":
+            hands = get_all_hands()
+            report = analyze(hands)
+            latest = hands[-1] if hands else None
+            live = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "latest": latest,
+                "prediction": None,
+                "strategy": None,
+                "margin": None,
+            }
+            if latest and report.get("strategies"):
+                applicable = [
+                    x for x in report["strategies"]
+                    if x["side"] == "player"
+                    and x["from"] == latest.get("player_first_suit")
+                ]
+                if not applicable:
+                    applicable = [
+                        x for x in report["strategies"]
+                        if x["side"] == "banker"
+                        and x["from"] == latest.get("banker_first_suit")
+                    ]
+                if applicable:
+                    applicable.sort(
+                        key=lambda x: (x["confidence"], x["hit_rate"], x["sample"]),
+                        reverse=True
+                    )
+                    best = applicable[0]
+                    live["prediction"] = {
+                        "suit": best["to"],
+                        "symbol": EMOJI[best["to"]],
+                        "hit_rate": best["hit_rate"],
+                        "confidence": best["confidence"],
+                        "sample": best["sample"],
+                    }
+                    live["strategy"] = best["name"]
+                    live["margin"] = round(best["hit_rate"] - 25.0, 2)
+            self.send_json(live)
+
         elif path == "/api/hands":
             limit = int(qs.get("limit", [50])[0])
             offset = int(qs.get("offset", [0])[0])
@@ -436,81 +476,92 @@ DASHBOARD = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Xcode SUIT CARD STRATÉGIE CREATOR</title>
+<title>Xcode Suit Card — Live Strategy</title>
 <style>
-:root { --bg:#0f1419; --card:#1a2332; --accent:#3b82f6; --green:#22c55e; --text:#e2e8f0; --muted:#94a3b8; }
-* { box-sizing:border-box; margin:0; padding:0; }
-body { font-family:system-ui,sans-serif; background:var(--bg); color:var(--text); padding:2rem; min-height:100vh; }
-h1 { font-size:1.7rem; margin-bottom:.4rem; }
-.sub { color:var(--muted); margin-bottom:2rem; }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:1rem; margin-bottom:2rem; }
-.card { background:var(--card); border-radius:12px; padding:1.2rem; border:1px solid #2d3748; }
-.card h3 { font-size:.8rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:.4rem; }
-.card .v { font-size:1.9rem; font-weight:700; color:var(--green); }
-.actions { display:flex; gap:.8rem; flex-wrap:wrap; margin-bottom:1.5rem; }
-button { background:var(--accent); color:#fff; border:none; padding:.7rem 1.3rem; border-radius:8px; font-size:.95rem; cursor:pointer; }
-button.sec { background:#475569; }
-button:hover { opacity:.9; }
-#out { background:var(--card); border-radius:12px; padding:1.3rem; min-height:140px; font-family:ui-monospace,monospace; font-size:.88rem; white-space:pre-wrap; border:1px solid #2d3748; }
-.foot { margin-top:2.5rem; color:var(--muted); font-size:.82rem; }
+:root{--bg:#07111f;--panel:#0d1b2d;--line:#1d3552;--text:#f4f7fb;--muted:#8fa6bf;--accent:#4f8cff;--ok:#34d399;--warn:#fbbf24;--shadow:0 18px 50px rgba(0,0,0,.25)}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0%,#102b49 0,#07111f 42%,#050b14 100%);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
+.shell{max-width:1280px;margin:auto;padding:26px}.top{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:22px}
+.brand{display:flex;align-items:center;gap:14px}.logo{width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,#4f8cff,#7c5cff);display:grid;place-items:center;font-size:25px;box-shadow:0 10px 30px rgba(79,140,255,.28)}
+h1{font-size:clamp(1.35rem,3vw,2rem);margin:0;letter-spacing:-.03em}.sub{color:var(--muted);margin:4px 0 0;font-size:.9rem}
+.live-pill{display:flex;align-items:center;gap:8px;border:1px solid #1e4b43;background:#0b2724;color:#8ff0d0;padding:8px 12px;border-radius:999px;font-size:.78rem;font-weight:700}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 14px var(--ok);animation:pulse 1.5s infinite}@keyframes pulse{50%{opacity:.35;transform:scale(.75)}}
+.hero{display:grid;grid-template-columns:1.45fr .85fr;gap:18px;margin-bottom:18px}.panel{background:linear-gradient(180deg,rgba(16,36,59,.96),rgba(9,23,39,.96));border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);overflow:hidden}
+.panel-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--line)}.panel-title{font-weight:800;font-size:.96rem}.eyebrow{color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.12em}
+.live-main{padding:24px 20px;display:grid;grid-template-columns:1fr 1fr;gap:18px}.game-box,.prediction-box{border:1px solid var(--line);border-radius:16px;padding:18px;background:rgba(4,13,24,.35)}
+.label{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px}.game-number{font-size:2rem;font-weight:900}.cards{display:flex;gap:9px;flex-wrap:wrap;margin-top:13px}
+.card-chip{min-width:56px;height:70px;border-radius:12px;background:#f8fafc;color:#101827;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;box-shadow:0 7px 18px rgba(0,0,0,.25)}.card-chip small{font-size:1.1rem}.red{color:#e11d48}.black{color:#111827}
+.pred{display:flex;align-items:center;gap:15px}.suit{font-size:4.2rem;line-height:1}.pred-name{font-size:1.5rem;font-weight:900}.metric{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.metric div{background:#091625;border-radius:12px;padding:11px}.metric b{display:block;font-size:1.15rem;margin-top:3px}.metric span{font-size:.68rem;color:var(--muted);text-transform:uppercase}.margin{color:var(--ok)!important}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}.stat{padding:18px 20px}.stat .value{font-size:1.55rem;font-weight:900;margin-top:5px}.stat .small{font-size:.74rem;color:var(--muted)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.actions{display:flex;gap:9px;flex-wrap:wrap;padding:16px 20px}
+button{border:0;border-radius:10px;padding:10px 14px;color:white;background:var(--accent);font-weight:750;cursor:pointer}button.sec{background:#1a304a;border:1px solid var(--line)}button:hover{filter:brightness(1.12)}
+.table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse;font-size:.84rem}.table th,.table td{text-align:left;padding:12px 14px;border-bottom:1px solid #172d45}.table th{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.badge{padding:4px 8px;border-radius:999px;background:#142e49;color:#bcd7f7;font-weight:700;font-size:.7rem}.out{padding:18px 20px;min-height:100px;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem;color:#b8c9dc}
+.foot{color:#68809b;font-size:.73rem;text-align:center;padding:24px 0}@media(max-width:900px){.hero,.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}@media(max-width:560px){.shell{padding:14px}.live-main{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.top{align-items:flex-start}.live-pill{font-size:.68rem}}
 </style>
 </head>
 <body>
-<h1>♠ Xcode SUIT CARD STRATÉGIE CREATOR</h1>
-<p class="sub">Site indépendant auto-apprenant — Collecte + Analyse + Stratégies Baccarat</p>
+<div class="shell">
+<header class="top"><div class="brand"><div class="logo">♠</div><div><h1>Xcode Suit Card</h1><p class="sub">Console de stratégie — analyse historique + lecture du jeu courant</p></div></div><div class="live-pill"><span class="dot"></span> LIVE • actualisation automatique</div></header>
+
+<section class="hero">
+<div class="panel">
+<div class="panel-head"><div><div class="eyebrow">Flux actuel</div><div class="panel-title">Jeu le plus récent détecté</div></div><span id="liveTime" class="badge">--:--:--</span></div>
+<div class="live-main">
+<div class="game-box"><div class="label">Main / manche</div><div id="gameNo" class="game-number">—</div><div class="cards" id="playerCards"><span class="badge">Chargement…</span></div><div class="label" style="margin-top:17px">Player</div></div>
+<div class="game-box"><div class="label">Cartes Banker</div><div class="cards" id="bankerCards"><span class="badge">—</span></div><div class="label" style="margin-top:17px">Banker</div></div>
+</div></div>
+
+<div class="panel"><div class="panel-head"><div><div class="eyebrow">Stratégie active</div><div class="panel-title">Marge de prédiction</div></div><span id="strategyBadge" class="badge">En attente</span></div>
+<div style="padding:24px 20px"><div class="pred"><div id="predSuit" class="suit">—</div><div><div class="label">Enseigne projetée</div><div id="predName" class="pred-name">Aucune donnée</div></div></div>
+<div class="metric"><div><span>Taux historique</span><b id="hitRate">—</b></div><div><span>Marge vs 25%</span><b id="margin" class="margin">—</b></div><div><span>Échantillon</span><b id="sample">—</b></div><div><span>Confiance</span><b id="confidence">—</b></div></div></div></div>
+</section>
+
+<section class="stats">
+<div class="panel stat"><div class="eyebrow">Mains en base</div><div id="total" class="value">{total_hands}</div><div class="small">données collectées</div></div>
+<div class="panel stat"><div class="eyebrow">Plus ancien</div><div id="oldest" class="value">{oldest_n}</div><div class="small">numéro de jeu</div></div>
+<div class="panel stat"><div class="eyebrow">Plus récent</div><div id="latest" class="value">{latest_n}</div><div class="small">numéro de jeu</div></div>
+<div class="panel stat"><div class="eyebrow">Stratégies</div><div id="stratCount" class="value">—</div><div class="small">détectées automatiquement</div></div>
+</section>
+
 <div class="grid">
-<div class="card"><h3>Mains en base</h3><div class="v" id="total">{total_hands}</div></div>
-<div class="card"><h3>Plus ancien #N</h3><div class="v" id="oldest">{oldest_n}</div></div>
-<div class="card"><h3>Plus récent #N</h3><div class="v" id="latest">{latest_n}</div></div>
+<section class="panel"><div class="panel-head"><div><div class="eyebrow">Contrôle</div><div class="panel-title">Collecte & analyse</div></div></div>
+<div class="actions"><button onclick="go(10)">Collecter 10 pages</button><button class="sec" onclick="go(25)">Historique 25 pages</button><button class="sec" onclick="analyse()">Analyse complète</button><button class="sec" onclick="strats()">Stratégies</button></div>
+<div id="out" class="out">Système prêt. La vue LIVE se met à jour automatiquement.</div></section>
+
+<section class="panel"><div class="panel-head"><div><div class="eyebrow">Historique immédiat</div><div class="panel-title">Derniers jeux</div></div></div>
+<div class="table-wrap"><table class="table"><thead><tr><th>#N</th><th>Player</th><th>Banker</th><th>P1</th><th>B1</th></tr></thead><tbody id="recent"><tr><td colspan="5">Chargement…</td></tr></tbody></table></div></section>
 </div>
-<div class="actions">
-<button onclick="go(10)">Collecter 10 pages</button>
-<button class="sec" onclick="go(25)">Collecter 25 pages (historique)</button>
-<button class="sec" onclick="analyse()">Lancer l'analyse</button>
-<button class="sec" onclick="strats()">Voir stratégies</button>
+<div class="foot">Xcode SUIT CARD STRATÉGIE CREATOR · Les taux affichés sont historiques et ne garantissent pas le résultat d'un jeu futur.</div>
 </div>
-<div id="out">Prêt. Cliquez sur « Collecter » pour démarrer la collecte depuis le canal Telegram.</div>
-<div class="foot">Source : t.me/statistika_baccara · Système auto-renforçant · Port {port}</div>
+
 <script>
-async function go(pages) {{
-const el = document.getElementById('out');
-el.textContent = 'Collecte en cours (' + pages + ' pages)... Cela peut prendre 15-40 secondes.';
-try {{
-const r = await fetch('/api/collect?pages=' + pages, {{method:'POST'}});
-const d = await r.json();
-el.textContent = JSON.stringify(d, null, 2);
-const ov = await (await fetch('/api/stats/overview')).json();
-document.getElementById('total').textContent = ov.total_hands;
-document.getElementById('oldest').textContent = ov.oldest_n || '—';
-document.getElementById('latest').textContent = ov.latest_n || '—';
-}} catch(e) {{ el.textContent = 'Erreur: ' + e; }}
-}}
-async function analyse() {{
-const el = document.getElementById('out');
-el.textContent = 'Analyse en cours...';
-try {{
-const d = await (await fetch('/api/analysis/full')).json();
-let t = '=== ANALYSE COMPLÈTE ===\\n';
-t += 'Mains : ' + d.n_hands + ' | Range #N : ' + d.n_range.min + ' → ' + d.n_range.max + '\\n\\n';
-t += '1ère carte Player : ' + JSON.stringify(d.player_first) + '\\n';
-t += '1ère carte Banker : ' + JSON.stringify(d.banker_first) + '\\n\\n';
-t += 'Stratégies détectées : ' + d.strategies_count + '\\n\\n';
-t += 'TOP STRATÉGIES:\\n';
-(d.strategies||[]).slice(0,8).forEach((s,i) => {{
-t += (i+1) + '. [' + s.hit_rate + '% | n=' + s.sample + ' | conf=' + s.confidence + ']\\n';
-t += ' ' + s.description + '\\n';
-}});
-el.textContent = t;
-}} catch(e) {{ el.textContent = 'Erreur: ' + e; }}
-}}
-async function strats() {{
-const el = document.getElementById('out');
-el.textContent = 'Chargement stratégies...';
-try {{
-const d = await (await fetch('/api/analysis/strategies')).json();
-el.textContent = JSON.stringify(d, null, 2);
-}} catch(e) {{ el.textContent = 'Erreur: ' + e; }}
-}}
+const suitMap={H:'♥',D:'♦',S:'♠',C:'♣'}, redSuit=s=>s==='H'||s==='D';
+function cardHtml(rank,suit){return `<div class="card-chip ${redSuit(suit)?'red':'black'}"><strong>${rank}</strong><small>${suitMap[suit]||suit}</small></div>`}
+function setText(id,v){document.getElementById(id).textContent=v??'—'}
+async function refreshLive(){
+ try{
+  const d=await(await fetch('/api/live',{cache:'no-store'})).json(),h=d.latest;
+  setText('liveTime',new Date().toLocaleTimeString());
+  if(h){
+   setText('gameNo','#N'+h.n);setText('latest',h.n);
+   document.getElementById('playerCards').innerHTML=(h.player_suits||'').split(',').map((s,i)=>s?cardHtml('P'+(i+1),s):'').join('');
+   document.getElementById('bankerCards').innerHTML=(h.banker_suits||'').split(',').map((s,i)=>s?cardHtml('B'+(i+1),s):'').join('');
+  }
+  if(d.prediction){
+   setText('predSuit',d.prediction.symbol);setText('predName',d.prediction.symbol+' — enseigne proposée');
+   setText('hitRate',d.prediction.hit_rate+'%');setText('margin',(d.margin>=0?'+':'')+d.margin+' pts');
+   setText('sample',d.prediction.sample);setText('confidence',Math.round(d.prediction.confidence*100)+'%');setText('strategyBadge',d.strategy);
+  }else{['predSuit','predName','hitRate','margin','sample','confidence'].forEach(id=>setText(id,'—'));setText('strategyBadge','En attente')}
+  const rows=await(await fetch('/api/hands?limit=8',{cache:'no-store'})).json();
+  document.getElementById('recent').innerHTML=rows.map(r=>`<tr><td><b>#${r.n}</b></td><td>${r.player_suits||'—'}</td><td>${r.banker_suits||'—'}</td><td><span class="badge">${suitMap[r.player_first_suit]||'—'}</span></td><td><span class="badge">${suitMap[r.banker_first_suit]||'—'}</span></td></tr>`).join('');
+ }catch(e){console.error(e)}
+}
+async function refreshStats(){try{const ov=await(await fetch('/api/stats/overview',{cache:'no-store'})).json();setText('total',ov.total_hands);setText('oldest',ov.oldest_n||'—');setText('latest',ov.latest_n||'—');const st=await(await fetch('/api/analysis/strategies',{cache:'no-store'})).json();setText('stratCount',st.count)}catch(e){}}
+async function go(pages){const el=document.getElementById('out');el.textContent='Collecte en cours…';try{const d=await(await fetch('/api/collect?pages='+pages,{method:'POST'})).json();el.textContent=JSON.stringify(d,null,2);await refreshStats();await refreshLive()}catch(e){el.textContent='Erreur : '+e}}
+async function analyse(){const el=document.getElementById('out');el.textContent='Analyse en cours…';try{const d=await(await fetch('/api/analysis/full')).json();el.textContent=JSON.stringify(d,null,2)}catch(e){el.textContent='Erreur : '+e}}
+async function strats(){const el=document.getElementById('out');el.textContent='Chargement des stratégies…';try{const d=await(await fetch('/api/analysis/strategies')).json();el.textContent=JSON.stringify(d,null,2)}catch(e){el.textContent='Erreur : '+e}}
+refreshStats();refreshLive();setInterval(refreshLive,3000);setInterval(refreshStats,10000);
 </script>
 </body>
 </html>
