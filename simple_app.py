@@ -236,7 +236,7 @@ def pick_prediction(hands, strategies):
     best=max(applicable, key=score)
     rate=best["real_rate"] if best["real_total"]>=MIN_VALIDATIONS else best["hist_rate"]
     note=None
-    if latest.get("is_33"): note="ATTENTION: main precedente 3-3"
+    if latest.get("is_33"): note="⚠ 3-3 precedent: possible changement algo — vigilance"
     elif latest.get("player_drew_3"): note="Joueur 3 cartes precedemment"
     diag=(f"Score REEL {best['real_rate']}% ({best['real_hits']}/{best['real_total']})"
           if best["real_total"]>=MIN_VALIDATIONS else f"Score HISTO {best['hist_rate']}% (n={best['sample_size']})")
@@ -447,6 +447,11 @@ h1{font-family:Cinzel,serif;font-size:clamp(1.3rem,4vw,1.85rem);font-weight:900;
 .pred-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
 .suit-big{font-size:3.4rem;line-height:1}
 .pname{font-family:Cinzel,serif;font-size:1.1rem;font-weight:900;color:var(--gold)}
+.btn-copy-pred{margin-top:8px;border:1px solid var(--gold-dim);background:#1a1010;color:var(--gold);
+  padding:6px 12px;border-radius:4px;font-family:Cinzel,serif;font-size:.65rem;letter-spacing:.08em;
+  cursor:pointer;text-transform:uppercase}
+.btn-copy-pred:hover{border-color:var(--gold);background:#2a1810}
+.btn-copy-pred.ok{background:#1a2a18;border-color:var(--ok);color:var(--ok)}
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .metric{background:#12080c;border-radius:4px;padding:7px;border:1px solid var(--border)}
 .metric span{display:block;font-size:.55rem;text-transform:uppercase;color:var(--muted)}.metric b{font-size:.9rem}
@@ -495,7 +500,7 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 <span class="pill" id="live-badge">OFF</span></div>
 <div class="pb">
 <button class="btn-demarrer off" id="btn-live" onclick="toggleLive()">DEMARRER LIVE</button>
-<div class="demarrer-desc">Scan 8s · collecte + validation + rescoring + bascule si decroche</div>
+<div class="demarrer-desc">Scan 4s · pred des cartes P1 connues (2 ou 3) · pas besoin fin de main · vigilance 3-3</div>
 <div class="live-status" id="live-status">LIVE arrete.</div>
 <div class="btn-row">
 <button class="act pri" onclick="collect(8)">Collecter 8</button>
@@ -517,9 +522,10 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 <div class="box"><div class="ey">BANKER</div><div class="cards" id="bc" style="margin-top:5px">—</div>
 <div style="margin-top:8px" class="ey">Cadence</div><b>~60 min</b></div>
 </div><div class="note" id="alert33">Main 3-3 — vigilance algo.</div></div></div>
-<div class="panel gt"><div class="ph"><div><div class="ey">Prediction</div><div class="title">Prochain JOUEUR</div></div><span class="pill" id="strat">AUTO</span></div>
+<div class="panel gt"><div class="ph"><div><div class="ey">Prediction live</div><div class="title">Prochain JOUEUR (des P1 connu)</div></div><span class="pill" id="strat">AUTO</span></div>
 <div class="pb"><div class="pred-row"><div class="suit-big" id="ps">—</div>
-<div><div class="ey">Enseigne</div><div class="pname" id="pn">En attente</div><span class="pill" id="target">Cible —</span></div></div>
+<div><div class="ey">Enseigne</div><div class="pname" id="pn">En attente</div><span class="pill" id="target">Cible —</span>
+<button type="button" class="btn-copy-pred" id="btn-copy-one" onclick="copyOnePred()">⧉ COPIER #N…</button></div></div>
 <div class="metrics">
 <div class="metric"><span>Taux</span><b id="rate">—</b></div><div class="metric"><span>Marge</span><b id="margin">—</b></div>
 <div class="metric"><span>Echantillon</span><b id="sample">—</b></div><div class="metric"><span>Confiance</span><b id="conf">—</b></div>
@@ -544,7 +550,7 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 <div style="margin-top:10px" class="ey">Schemas</div><div class="patterns" id="patterns" style="margin-top:5px">—</div>
 <div class="out" id="out">collecter → valider → scorer → pruner → predire</div></div></section>
 </div>
-<div class="foot">Bascule si real_rate &lt; 22% · stockage serveur</div>
+<div class="foot">VALID = enseigne predite PARMI les cartes P1 · pred des P1 connu · bascule si real_rate &lt; 22%</div>
 </div>
 <script>
 const sm={H:'♥',D:'♦',S:'♠',C:'♣'},sn={H:'Coeur',D:'Carreau',S:'Pique',C:'Trefle'};
@@ -557,9 +563,9 @@ function setLiveUI(on){const b=document.getElementById('btn-live'),g=document.ge
 if(on){b.textContent='LIVE AUTO ACTIF';b.classList.remove('off');g.innerHTML='<span class="dot"></span>LIVE'}
 else{b.textContent='DEMARRER LIVE';b.classList.add('off');g.textContent='OFF'}}
 function toggleLive(){if(liveOn){liveOn=false;if(liveTimer){clearInterval(liveTimer);liveTimer=null}setLiveUI(false);tx('live-status','LIVE arrete.');return}
-liveOn=true;setLiveUI(true);tx('live-status','LIVE…');runLiveTick();liveTimer=setInterval(runLiveTick,8000)}
+liveOn=true;setLiveUI(true);tx('live-status','LIVE…');runLiveTick();liveTimer=setInterval(runLiveTick,4000)}
 async function runLiveTick(){if(liveBusy)return;liveBusy=true;try{tx('live-status','Collecte + learn…');
-const d=await j('/api/collect?pages=4',{method:'POST'});await refreshAll();
+const d=await j('/api/collect?pages=3',{method:'POST'});await refreshAll();
 const L=d.learning||{};let m=d.status==='ok'?`+${d.hands_new||0} · ${L.active_count||0} actives`:'Err';
 if(L.deactivated&&L.deactivated.length)m+=' · '+L.deactivated.length+' coupees';tx('live-status',m)}
 catch(e){tx('live-status','Err '+e.message)}finally{liveBusy=false}}
@@ -578,9 +584,12 @@ const [l,h,p,st,hands,stR]=await Promise.all([j('/api/live'),j('/api/predictions
 const x=l.latest;tx('clock',new Date().toLocaleTimeString());
 if(x){tx('gn','#N'+x.n);document.getElementById('pc').innerHTML=(x.player_suits||'').split(',').filter(Boolean).map((s,i)=>card('P'+(i+1),s)).join('')||'—';
 document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—';
-tx('fmt',x.format||'?');const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none'}
+tx('fmt',x.format||'?');const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none';
+if(x.is_33){const ls=document.getElementById('live-status');if(ls&&!ls.textContent.includes('3-3'))ls.textContent=(ls.textContent||'')+' · ⚠ dernier jeu 3-3'}}
 if(l.prediction){const q=l.prediction;tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
-tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');tx('rate',q.hit_rate+'%');
+tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');
+window._lastPredTxt='#N'+l.prediction_target_n+(q.symbol||sm[q.suit]||q.suit||'');
+const b1=document.getElementById('btn-copy-one');if(b1)b1.textContent='⧉ COPIER '+window._lastPredTxt;tx('rate',q.hit_rate+'%');
 tx('margin',(q.margin>=0?'+':'')+q.margin);tx('sample',q.sample);tx('conf',Math.round((q.confidence||0)*100)+'%');
 const pn=document.getElementById('pnote');if(q.note){pn.style.display='block';pn.textContent=q.note}else{pn.style.display='none'}}
 const ps=l.pred_stats||{};tx('total',st.total_hands);tx('preds',ps.total||h.length);tx('valid',ps.valid||0);tx('invalid',ps.invalid||0);
@@ -598,10 +607,19 @@ if(l.learning&&l.learning.diagnosis)tx('out','Diag: '+l.learning.diagnosis);
 }catch(e){tx('out','Err '+e)}}
 async function collect(n){tx('out','Collecte…');try{const d=await j('/api/collect?pages='+n,{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
 async function learn(){tx('out','Learn…');try{const d=await j('/api/learn',{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
+async function copyOnePred(){
+  const txt=window._lastPredTxt||'';
+  if(!txt){alert('Pas de prediction');return}
+  try{
+    await navigator.clipboard.writeText(txt);
+    const b=document.getElementById('btn-copy-one');
+    if(b){const o=b.textContent;b.textContent='✓ COPIE';b.classList.add('ok');setTimeout(()=>{b.textContent=o;b.classList.remove('ok')},1200)}
+  }catch(e){alert('Copie impossible')}
+}
 async function copyPred(){try{const h=await j('/api/predictions?limit=300');
 const t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'-'} | ${x.hit_rate}% | ${x.status} | ${(x.actual_first_suit||'').split(',').map(s=>sm[s]||s).filter(Boolean).join(' ')||'-'}`).join('\n');
 await navigator.clipboard.writeText(t||'Vide')}catch(e){alert('Copie KO')}}
-refreshAll();setInterval(refreshAll,5000);
+refreshAll();setInterval(refreshAll,3000);
 </script></body></html>
 """
 
