@@ -345,7 +345,7 @@ def run_learning_cycle(recheck=False):
 
 def fetch_page(before=None):
     url=CHANNEL_WEB+(f"?before={before}" if before else "")
-    r=requests.get(url,headers=HEADERS,timeout=20); r.raise_for_status()
+    r=requests.get(url,headers=HEADERS,timeout=12); r.raise_for_status()
     soup=BeautifulSoup(r.text,"html.parser"); messages,ids=[],[]
     for w in soup.select(".tgme_widget_message"):
         post=w.get("data-post",""); mid=None
@@ -428,7 +428,9 @@ class Handler(BaseHTTPRequestHandler):
                     (datetime.utcnow().isoformat(),len(parsed),new,"success")); c.commit(); c.close()
                 self.send_json({"status":"ok","hands_found":len(parsed),"hands_new":new,
                     "message":f"{new} nouvelles · apprentissage maj","learning":cycle,"next_prediction":cycle.get("prediction")})
-            except Exception as e: self.send_json({"status":"error","error":str(e)},500)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self.send_json({"status":"error","error":str(e),"hint":"Telegram inaccessible depuis le serveur?"},500)
         elif path=="/api/learn":
             self.send_json({"status":"ok","learning":run_learning_cycle(recheck=True)})
         else: self.send_json({"error":"Not found"},404)
@@ -576,23 +578,46 @@ const sm={H:'♥',D:'♦',S:'♠',C:'♣'},sn={H:'Coeur',D:'Carreau',S:'Pique',C
 const red=s=>s==='H'||s==='D';
 const tx=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v??'—'};
 const card=(lab,s)=>`<div class="card ${red(s)?'red':''}"><strong>${lab}</strong><small>${sm[s]||s}</small></div>`;
-async function j(u,o){return(await fetch(u,o)).json()}
+async function j(u,o){
+  const ctrl=new AbortController();
+  const ms=(o&&o.timeout)||25000;
+  const to=setTimeout(()=>ctrl.abort(),ms);
+  try{
+    const r=await fetch(u,Object.assign({},o||{},{signal:ctrl.signal}));
+    clearTimeout(to);
+    const txt=await r.text();
+    try{return JSON.parse(txt)}catch(e){throw new Error('Reponse invalide HTTP '+r.status)}
+  }catch(e){
+    clearTimeout(to);
+    if(e.name==='AbortError')throw new Error('Timeout '+ms/1000+'s — Telegram lent ou bloque');
+    throw e;
+  }
+}
 let liveOn=false,liveTimer=null,liveBusy=false;
 function setLiveUI(on){const b=document.getElementById('btn-live'),g=document.getElementById('live-badge');
 if(on){b.textContent='LIVE AUTO ACTIF';b.classList.remove('off');g.innerHTML='<span class="dot"></span>LIVE'}
 else{b.textContent='DEMARRER LIVE';b.classList.add('off');g.textContent='OFF'}}
 function toggleLive(){if(liveOn){liveOn=false;if(liveTimer){clearInterval(liveTimer);liveTimer=null}setLiveUI(false);tx('live-status','LIVE arrete.');return}
 liveOn=true;setLiveUI(true);tx('live-status','LIVE…');runLiveTick();liveTimer=setInterval(runLiveTick,4000)}
-async function runLiveTick(){if(liveBusy)return;liveBusy=true;try{tx('live-status','Collecte + learn…');
-const d=await j('/api/collect?pages=3',{method:'POST'});
-await refreshAll();
-if(d&&d.status==='error'){tx('live-status','Collecte: '+(d.error||'erreur'));}
-else{const L=(d&&d.learning)||{};let m='+'+(d&&d.hands_new!=null?d.hands_new:0)+' · '+(L.active_count||0)+' actives';
-if(L.deactivated&&L.deactivated.length)m+=' · '+L.deactivated.length+' coupees';
-if(d&&d.next_prediction)m+=' · pred '+(d.next_prediction.symbol||d.next_prediction.suit||'');
-tx('live-status',m);}}
-catch(e){tx('live-status','Err '+e.message);try{await refreshAll()}catch(e2){}}
-finally{liveBusy=false}}
+async function runLiveTick(){
+if(liveBusy)return;liveBusy=true;
+tx('live-status','Collecte + learn…');
+try{
+  const d=await j('/api/collect?pages=2',{method:'POST',timeout:35000});
+  await refreshAll();
+  if(d&&d.status==='error'){tx('live-status','Collecte: '+(d.error||'erreur'));}
+  else{
+    const L=(d&&d.learning)||{};
+    let m='+'+(d&&d.hands_new!=null?d.hands_new:0)+' nouvelles · '+(L.active_count||0)+' strat';
+    if(d&&d.next_prediction)m+=' · pred '+(d.next_prediction.symbol||'');
+    if(d&&d.hands_found!=null)m+=' · vus '+d.hands_found;
+    tx('live-status',m);
+  }
+}catch(e){
+  tx('live-status','Erreur: '+e.message);
+  try{await refreshAll()}catch(e2){}
+}finally{liveBusy=false}
+}
 async function refreshAll(){try{
 const [l,h,p,st,hands,stR]=await Promise.all([j('/api/live'),j('/api/predictions?limit=200'),j('/api/patterns?limit=15'),j('/api/stats/overview'),j('/api/hands?limit=30'),j('/api/strategies')]);
 const x=l.latest;tx('clock',new Date().toLocaleTimeString());
@@ -633,7 +658,21 @@ async function copyOnePred(){
 async function copyPred(){try{const h=await j('/api/predictions?limit=300');
 const t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'-'} | ${x.hit_rate}% | ${x.status} | ${(x.actual_first_suit||'').split(',').map(s=>sm[s]||s).filter(Boolean).join(' ')||'-'}`).join('\n');
 await navigator.clipboard.writeText(t||'Vide')}catch(e){alert('Copie KO')}}
-refreshAll();setInterval(refreshAll,3000);
+refreshAll();
+setInterval(refreshAll,3000);
+// si base vide au demarrage, une collecte legere
+setTimeout(async()=>{
+  try{
+    const st=await j('/api/stats/overview',{timeout:8000});
+    if(st&&(st.total_hands||0)<3){
+      tx('live-status','Base vide — premiere collecte…');
+      const d=await j('/api/collect?pages=5',{method:'POST',timeout:45000});
+      await refreshAll();
+      tx('live-status',d.status==='ok'?('Init +'+(d.hands_new||0)+' mains'):('Init: '+(d.error||'ko')));
+    }
+  }catch(e){tx('live-status','Init: '+e.message)}
+},800);
+
 </script></body></html>
 """
 
