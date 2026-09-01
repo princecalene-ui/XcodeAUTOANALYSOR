@@ -496,6 +496,50 @@ def invert_suit(suit, rate):
         return m.get(suit, suit), "INV 21.5-30.4 ♣↔♠ / ♥↔♦"
     return suit, None
 
+def all_check_prev(suit, latest):
+    """
+    Confirmation finale universelle (AllCheckPrev / CtrlTour).
+    S'applique après toutes les autres inversions, sur TOUTE prédiction
+    (victoire ou défaite, formats 2-2 / 2-3 / 3-3), en se basant
+    uniquement sur la 1ère carte JOUEUR du jeu précédent (données Telegram).
+    """
+    if not latest or not suit:
+        return suit, None
+    prev_suit = latest.get("player_first_suit")
+    prev_val = latest.get("player_first_val")
+    if not prev_suit or prev_val is None:
+        return suit, None
+    prev_color = COLOR_MAP.get(prev_suit)
+    pred_color = COLOR_MAP.get(suit)
+    if not prev_color or not pred_color:
+        return suit, None
+    try:
+        is_even = (int(prev_val) % 2 == 0)
+    except (TypeError, ValueError):
+        return suit, None
+    is_same_suit = (suit == prev_suit)
+    is_same_color = (pred_color == prev_color)
+
+    # 1) Enseigne prédite identique à la 1ère carte joueur du jeu précédent
+    if is_same_suit:
+        m = {"S": "C", "C": "S", "H": "D", "D": "H"}
+        new_suit = m.get(suit, suit)
+        return new_suit, "AllCheckPrev · CtrlTour · INV same-suit ♠↔♣ / ♥↔♦"
+
+    # 2) Couleurs différentes + valeur paire du P1 précédent
+    if (not is_same_color) and is_even:
+        m = {"D": "C", "C": "D", "H": "S", "S": "H"}
+        new_suit = m.get(suit, suit)
+        return new_suit, "AllCheckPrev · CtrlTour · INV diff-color+even ♦↔♣ / ♥↔♠"
+
+    # 3) Couleurs identiques + valeur impaire du P1 précédent
+    if is_same_color and (not is_even):
+        m = {"S": "H", "H": "S", "D": "C", "C": "D"}
+        new_suit = m.get(suit, suit)
+        return new_suit, "AllCheckPrev · CtrlTour · INV same-color+odd ♠↔♥ / ♦↔♣"
+
+    return suit, None
+
 def pick_prediction(hands, strategies):
     if not hands: return None, None, "Aucune main"
     latest=hands[-1]
@@ -517,9 +561,13 @@ def pick_prediction(hands, strategies):
         final_suit, inv_note = invert_suit(best_s, rate)
         if inv_note:
             note = (note + " · " if note else "") + inv_note + f" → {EMOJI[final_suit]}"
+        # Confirmation finale universelle AllCheckPrev / CtrlTour
+        final_suit, check_note = all_check_prev(final_suit, latest)
+        if check_note:
+            note = (note + " · " if note else "") + check_note + f" → {EMOJI[final_suit]}"
         pred={"suit":final_suit,"symbol":EMOJI[final_suit],"hit_rate":rate,"confidence":0.12,"sample":total,
               "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note,
-              "raw_suit":best_s,"inverted":bool(inv_note)}
+              "raw_suit":best_s,"inverted":bool(inv_note or check_note)}
         return pred, latest, pred["note"]
 
     applicable=[s for s in strategies if s["side"]=="player" and s["from_suit"]==latest.get("player_first_suit")]
@@ -543,9 +591,13 @@ def pick_prediction(hands, strategies):
             final_suit, inv_note = invert_suit(best_s, rate)
             if inv_note:
                 note = (note + " · " if note else "") + inv_note + f" → {EMOJI[final_suit]}"
+            # Confirmation finale universelle AllCheckPrev / CtrlTour
+            final_suit, check_note = all_check_prev(final_suit, latest)
+            if check_note:
+                note = (note + " · " if note else "") + check_note + f" → {EMOJI[final_suit]}"
             pred={"suit":final_suit,"symbol":EMOJI[final_suit],"hit_rate":rate,"confidence":0.1,"sample":total,
                   "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note,
-                  "raw_suit":best_s,"inverted":bool(inv_note)}
+                  "raw_suit":best_s,"inverted":bool(inv_note or check_note)}
             return pred, latest, pred["note"]
         return None, latest, "Rien d'applicable"
 
@@ -594,9 +646,13 @@ def pick_prediction(hands, strategies):
     final_suit, inv_note = invert_suit(best["to_suit"], rate)
     if inv_note:
         note = (note + " · " if note else "") + inv_note + f" → {EMOJI[final_suit]}"
+    # Confirmation finale universelle AllCheckPrev / CtrlTour
+    final_suit, check_note = all_check_prev(final_suit, latest)
+    if check_note:
+        note = (note + " · " if note else "") + check_note + f" → {EMOJI[final_suit]}"
     pred={"suit":final_suit,"symbol":EMOJI[final_suit],"hit_rate":rate,"confidence":best["confidence"],
           "sample":best["sample_size"],"margin":round(rate-25,2),"strategy":best["name"],"strategy_id":best["id"],"note":note,
-          "raw_suit":best["to_suit"],"inverted":bool(inv_note)}
+          "raw_suit":best["to_suit"],"inverted":bool(inv_note or check_note)}
     return pred, latest, note
 
 def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None):
