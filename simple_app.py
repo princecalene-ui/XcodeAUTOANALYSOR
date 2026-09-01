@@ -482,6 +482,20 @@ def strategies_on_cooldown(hist, cooldown=STREAK_COOLDOWN):
             seen_since_loss[name]=i
     return banned
 
+
+def invert_suit(suit, rate):
+    """Inversion selon le taux de la strat."""
+    if rate is None:
+        return suit, None
+    r = float(rate)
+    if 31.5 <= r <= 40.0:
+        m = {"H": "C", "C": "H", "S": "D", "D": "S"}
+        return m.get(suit, suit), "INV 31.5-40 ♥↔♣ / ♠↔♦"
+    if 21.5 <= r <= 30.4:
+        m = {"C": "S", "S": "C", "H": "D", "D": "H"}
+        return m.get(suit, suit), "INV 21.5-30.4 ♣↔♠ / ♥↔♦"
+    return suit, None
+
 def pick_prediction(hands, strategies):
     if not hands: return None, None, "Aucune main"
     latest=hands[-1]
@@ -500,8 +514,12 @@ def pick_prediction(hands, strategies):
         note="Fallback frequence"
         if recovery_hard: note="⚠ RATTRAPAGE (3+ pertes) · "+note
         elif recovery_soft: note="Rattrapage (2 pertes) · "+note
-        pred={"suit":best_s,"symbol":EMOJI[best_s],"hit_rate":rate,"confidence":0.12,"sample":total,
-              "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note}
+        final_suit, inv_note = invert_suit(best_s, rate)
+        if inv_note:
+            note = (note + " · " if note else "") + inv_note + f" → {EMOJI[final_suit]}"
+        pred={"suit":final_suit,"symbol":EMOJI[final_suit],"hit_rate":rate,"confidence":0.12,"sample":total,
+              "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note,
+              "raw_suit":best_s,"inverted":bool(inv_note)}
         return pred, latest, pred["note"]
 
     applicable=[s for s in strategies if s["side"]=="player" and s["from_suit"]==latest.get("player_first_suit")]
@@ -522,8 +540,12 @@ def pick_prediction(hands, strategies):
             best_s=pf.most_common(1)[0][0]; total=sum(pf.values()); rate=round(100*pf[best_s]/total,2)
             note=f"Aucune transition pour {latest.get('player_first_suit')}"
             if recovery_hard: note="⚠ RATTRAPAGE · "+note
-            pred={"suit":best_s,"symbol":EMOJI[best_s],"hit_rate":rate,"confidence":0.1,"sample":total,
-                  "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note}
+            final_suit, inv_note = invert_suit(best_s, rate)
+            if inv_note:
+                note = (note + " · " if note else "") + inv_note + f" → {EMOJI[final_suit]}"
+            pred={"suit":final_suit,"symbol":EMOJI[final_suit],"hit_rate":rate,"confidence":0.1,"sample":total,
+                  "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note,
+                  "raw_suit":best_s,"inverted":bool(inv_note)}
             return pred, latest, pred["note"]
         return None, latest, "Rien d'applicable"
 
@@ -569,8 +591,12 @@ def pick_prediction(hands, strategies):
     diag=(f"Score REEL {best['real_rate']}% ({best['real_hits']}/{best['real_total']})"
           if best["real_total"]>=MIN_VALIDATIONS else f"Score HISTO {best['hist_rate']}% (n={best['sample_size']})")
     note=f"{note} · {diag}" if note else diag
-    pred={"suit":best["to_suit"],"symbol":EMOJI[best["to_suit"]],"hit_rate":rate,"confidence":best["confidence"],
-          "sample":best["sample_size"],"margin":round(rate-25,2),"strategy":best["name"],"strategy_id":best["id"],"note":note}
+    final_suit, inv_note = invert_suit(best["to_suit"], rate)
+    if inv_note:
+        note = (note + " · " if note else "") + inv_note + f" → {EMOJI[final_suit]}"
+    pred={"suit":final_suit,"symbol":EMOJI[final_suit],"hit_rate":rate,"confidence":best["confidence"],
+          "sample":best["sample_size"],"margin":round(rate-25,2),"strategy":best["name"],"strategy_id":best["id"],"note":note,
+          "raw_suit":best["to_suit"],"inverted":bool(inv_note)}
     return pred, latest, note
 
 def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None):
@@ -822,7 +848,8 @@ class Handler(BaseHTTPRequestHandler):
                 "learning":{"validated_now":cycle.get("validated",0),"deactivated":cycle.get("deactivated",[]),
                     "active_count":cycle.get("active_count",0),"diagnosis":cycle.get("diagnosis"),
                     "player_ready":ready},
-                "pred_stats":{"total":len(hist),"valid":n_valid,"invalid":n_invalid,"pending":n_pending}})
+                "pred_stats":{"total":len(hist),"valid":n_valid,"invalid":n_invalid,"pending":n_pending},
+                "license": check_license(self._device_id())})
         elif path=="/api/predictions":
             validate_predictions(); self.send_json(get_prediction_history(int(qs.get("limit",[200])[0])))
         elif path=="/api/patterns": self.send_json(get_patterns(int(qs.get("limit",[30])[0])))
@@ -1013,7 +1040,7 @@ h1{font-family:Cinzel,serif;font-size:clamp(1.3rem,4vw,1.85rem);font-weight:900;
 .card{width:42px;height:52px;border-radius:6px;background:#f5f0e6;color:#1a1010;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;font-size:.75rem}
 .card small{font-size:.9rem}.card.red{color:#b82030}
 .pred-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.suit-big{font-size:3.4rem;line-height:1}
+.suit-big{font-size:4.2rem;line-height:1}
 .pname{font-family:Cinzel,serif;font-size:1.1rem;font-weight:900;color:var(--gold)}
 .btn-copy-pred{margin-top:8px;border:1px solid var(--gold-dim);background:#1a1010;color:var(--gold);
   padding:6px 12px;border-radius:4px;font-family:Cinzel,serif;font-size:.65rem;letter-spacing:.08em;
@@ -1059,10 +1086,25 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 .count{color:var(--gold);font-weight:700}.off{opacity:.45;text-decoration:line-through}
 .out{margin-top:7px;padding:8px;background:#12080c;border:1px solid var(--border);border-radius:4px;font:10px 'Courier Prime',monospace;color:var(--muted);white-space:pre-wrap;min-height:36px}
 .foot{text-align:center;color:#5a4048;font-size:.6rem;padding:14px 6px}
+.license-bar{background:linear-gradient(90deg,#1a1008,#2a1810);border:1px solid var(--gold-dim);border-radius:6px;padding:12px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.license-bar .cd{font-family:Cinzel,serif;font-size:1.6rem;font-weight:900;color:var(--gold);letter-spacing:.06em}
+.license-bar .cd.warn{color:#e0a040}.license-bar .cd.danger{color:var(--bad);animation:p 1s infinite}
+.license-bar .info{font-size:.72rem;color:var(--muted)}
+.pname{font-family:Cinzel,serif;font-size:1.35rem;font-weight:900;color:var(--gold)}
+#target{font-size:.85rem;padding:5px 12px}
+
 </style></head><body><div class="shell">
 <header><div style="color:var(--gold-dim);letter-spacing:.25em">♠ ♥ ♣ ♦</div>
 <h1>XCODE SUIT CARD</h1>
 <div class="sub">Auto-apprenant · pred des P1 suffisant · cartes live · bascule strategies</div></header>
+
+<div class="license-bar" id="license-bar">
+  <div>
+    <div class="ey">Temps restant</div>
+    <div class="cd" id="countdown">—:—:—</div>
+  </div>
+  <div class="info" id="lic-info">Vérification licence…</div>
+</div>
 
 <section class="panel gt"><div class="ph"><div><div class="ey">Telegram</div><div class="title">@statistika_baccara LIVE</div></div>
 <span class="pill" id="live-badge">OFF</span></div>
@@ -1092,7 +1134,7 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 </div><div class="note" id="alert33">Main 3-3 — vigilance algo.</div></div></div>
 <div class="panel gt"><div class="ph"><div><div class="ey">Prediction live</div><div class="title">Prochain JOUEUR (des P1 connu)</div></div><span class="pill" id="strat">AUTO</span></div>
 <div class="pb"><div class="pred-row"><div class="suit-big" id="ps">—</div>
-<div><div class="ey">Enseigne</div><div class="pname" id="pn">En attente</div><span class="pill" id="target">Cible —</span>
+<div><div class="ey">Enseigne</div><div class="pname" id="pn">En attente</div><span class="pill" id="target" style="font-size:1rem;padding:6px 14px;letter-spacing:.05em">Cible —</span>
 <button type="button" class="btn-copy-pred" id="btn-copy-one" onclick="copyOnePred()">⧉ COPIER #N…</button></div></div>
 <div class="metrics">
 <div class="metric"><span>Taux</span><b id="rate">—</b></div><div class="metric"><span>Marge</span><b id="margin">—</b></div>
@@ -1193,7 +1235,7 @@ if(!l.prediction){
   else if(pn0){pn0.style.display='none';}
   if(waiting){const rs=document.getElementById('live-status');if(rs)rs.textContent='⏳ #N'+(x?x.n:'?')+' P incomplete (▶) — pred en pause';}
 }if(l.prediction){const q=l.prediction;const p1n=(x&&x.player_suits)?x.player_suits.split(',').filter(Boolean).length:0;if(p1n>=2){const rs=document.getElementById('live-status');if(rs&&!String(rs.textContent).includes('P1 pret'))rs.textContent='P1 complet ('+p1n+' cartes) → pred #N'+(l.prediction_target_n||'?')+' emise';}tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
-tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');
+tx('target','#N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');
 window._lastPredTxt='#N'+l.prediction_target_n+(q.symbol||sm[q.suit]||q.suit||'');
 const b1=document.getElementById('btn-copy-one');if(b1)b1.textContent='⧉ COPIER '+window._lastPredTxt;tx('rate',q.hit_rate+'%');
 tx('margin',(q.margin>=0?'+':'')+q.margin);tx('sample',q.sample);tx('conf',Math.round((q.confidence||0)*100)+'%');
@@ -1210,6 +1252,7 @@ return `<div class="strat-item"><span class="${s.is_active?'':'off'}">${s.name}<
 document.getElementById('patterns').innerHTML=(Array.isArray(p)?p:[]).map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">x${x.occurrences}</span></div>`).join('')||'—';
 fillLiveTable(Array.isArray(hands)?hands:[], Array.isArray(h)?h:[]);
 if(l.learning&&l.learning.diagnosis)tx('out','Diag: '+l.learning.diagnosis);
+if(l.license&&l.license.remaining_seconds!=null)remainingSeconds=l.license.remaining_seconds;
 }catch(e){tx('out','Err '+e)}}
 async function collect(n){tx('out','Collecte…');try{const d=await j('/api/collect?pages='+n,{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
 async function learn(){tx('out','Learn…');try{const d=await j('/api/learn',{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
@@ -1225,6 +1268,40 @@ async function copyOnePred(){
 async function copyPred(){try{const h=await j('/api/predictions?limit=300');
 const t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'-'} | ${x.hit_rate}% | ${x.status} | ${(x.actual_first_suit||'').split(',').map(s=>sm[s]||s).filter(Boolean).join(' ')||'-'}`).join('\n');
 await navigator.clipboard.writeText(t||'Vide')}catch(e){alert('Copie KO')}}
+
+let remainingSeconds=0, cdTimer=null;
+function formatCD(sec){
+  if(sec<0)sec=0;
+  const d=Math.floor(sec/86400), h=Math.floor((sec%86400)/3600), m=Math.floor((sec%3600)/60), s=sec%60;
+  if(d>0) return d+'j '+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+function tickCountdown(){
+  const el=document.getElementById('countdown');
+  if(!el)return;
+  el.textContent=formatCD(remainingSeconds);
+  el.className='cd'+(remainingSeconds<60?' danger':remainingSeconds<300?' warn':'');
+  if(remainingSeconds<=0){
+    clearInterval(cdTimer);cdTimer=null;
+    localStorage.removeItem('xcode_license');
+    location.href='/';
+    return;
+  }
+  remainingSeconds--;
+}
+async function checkLicenseCD(){
+  try{
+    const d=await j('/api/license/status');
+    if(!d.ok){localStorage.removeItem('xcode_license');location.href='/';return;}
+    remainingSeconds=d.remaining_seconds||0;
+    const info=document.getElementById('lic-info');
+    if(info) info.textContent='Code '+(d.code||'').slice(0,6)+'… · expire '+(d.expires_at||'').replace('T',' ').slice(0,19)+' UTC';
+    if(!cdTimer){tickCountdown();cdTimer=setInterval(tickCountdown,1000);}
+  }catch(e){}
+}
+
+checkLicenseCD();
+setInterval(checkLicenseCD,60000);
 refreshAll();
 setInterval(refreshAll,3000);
 // si base vide au demarrage, une collecte legere
