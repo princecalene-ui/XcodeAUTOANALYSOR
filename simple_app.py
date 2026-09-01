@@ -18,7 +18,7 @@ CHANNEL_WEB = "https://t.me/s/statistika_baccara"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 PORT = int(os.environ.get("PORT", 8000))
 AUTO_COLLECT_INTERVAL = 90
-MIN_SAMPLE, MIN_RATE, DEACTIVATE_RATE, MIN_VALIDATIONS = 12, 28.0, 20.0, 6
+MIN_SAMPLE, MIN_RATE, DEACTIVATE_RATE, MIN_VALIDATIONS = 20, 30.0, 22.0, 8
 SUITS = ["H", "D", "S", "C"]
 EMOJI = {"H": "♥", "D": "♦", "S": "♠", "C": "♣"}
 SUIT_NAME = {"H": "Coeur", "D": "Carreau", "S": "Pique", "C": "Trefle"}
@@ -50,13 +50,7 @@ def parse_message(text, msg_id=None):
 
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-    c=sqlite3.connect(DB_PATH, timeout=60, check_same_thread=False)
-    c.row_factory=sqlite3.Row
-    try:
-        c.execute("PRAGMA busy_timeout=60000")
-    except Exception:
-        pass
-    return c
+    c=sqlite3.connect(DB_PATH); c.row_factory=sqlite3.Row; return c
 
 def init_db():
     c=get_conn()
@@ -242,7 +236,7 @@ def pick_prediction(hands, strategies):
     best=max(applicable, key=score)
     rate=best["real_rate"] if best["real_total"]>=MIN_VALIDATIONS else best["hist_rate"]
     note=None
-    if latest.get("is_33"): note="⚠ 3-3 precedent: possible changement algo — vigilance"
+    if latest.get("is_33"): note="ATTENTION: main precedente 3-3"
     elif latest.get("player_drew_3"): note="Joueur 3 cartes precedemment"
     diag=(f"Score REEL {best['real_rate']}% ({best['real_hits']}/{best['real_total']})"
           if best["real_total"]>=MIN_VALIDATIONS else f"Score HISTO {best['hist_rate']}% (n={best['sample_size']})")
@@ -253,18 +247,15 @@ def pick_prediction(hands, strategies):
 
 def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None):
     if not prediction: return
-    try:
-        c=get_conn()
-        c.execute("""INSERT INTO predictions (target_n,created_at,prediction_suit,strategy,strategy_id,confidence,hit_rate,margin,basis_n,basis_first_suit,note)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(target_n) DO UPDATE SET
-            prediction_suit=excluded.prediction_suit,strategy=excluded.strategy,strategy_id=excluded.strategy_id,
-            confidence=excluded.confidence,hit_rate=excluded.hit_rate,margin=excluded.margin,
-            basis_n=excluded.basis_n,basis_first_suit=excluded.basis_first_suit,note=excluded.note,created_at=excluded.created_at""",
-            (target_n,datetime.utcnow().isoformat(),prediction["suit"],prediction.get("strategy"),prediction.get("strategy_id"),
-             prediction.get("confidence",0),prediction.get("hit_rate",0),prediction.get("margin",0),basis_n,basis_first_suit,prediction.get("note")))
-        c.commit(); c.close()
-    except Exception as e:
-        print("upsert_prediction error:", e)
+    c=get_conn()
+    c.execute("""INSERT INTO predictions (target_n,created_at,prediction_suit,strategy,strategy_id,confidence,hit_rate,margin,basis_n,basis_first_suit,note)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(target_n) DO UPDATE SET
+        prediction_suit=excluded.prediction_suit,strategy=excluded.strategy,strategy_id=excluded.strategy_id,
+        confidence=excluded.confidence,hit_rate=excluded.hit_rate,margin=excluded.margin,
+        basis_n=excluded.basis_n,basis_first_suit=excluded.basis_first_suit,note=excluded.note,created_at=excluded.created_at""",
+        (target_n,datetime.utcnow().isoformat(),prediction["suit"],prediction.get("strategy"),prediction.get("strategy_id"),
+         prediction.get("confidence",0),prediction.get("hit_rate",0),prediction.get("margin",0),basis_n,basis_first_suit,prediction.get("note")))
+    c.commit(); c.close()
 
 def validate_predictions(recheck_all=False):
     """
@@ -321,31 +312,21 @@ def get_patterns(limit=20):
 
 def run_learning_cycle(recheck=False):
     hands=get_all_hands()
-    validated=0; created=0; deactivated=[]; strategies=[]; pred=None; latest=None; diag="—"
-    try: validated=validate_predictions(recheck_all=recheck)
-    except Exception as e: print("validate err", e)
-    try: score_strategies_from_validations()
-    except Exception as e: print("score err", e)
-    try: deactivated=prune_bad_strategies()
-    except Exception as e: print("prune err", e)
-    try: created=rebuild_strategies(hands)
-    except Exception as e: print("rebuild err", e)
-    try: record_patterns(hands)
-    except Exception as e: print("patterns err", e)
-    try: strategies=get_active_strategies()
-    except Exception as e: print("active err", e)
-    try:
-        pred,latest,diag=pick_prediction(hands,strategies)
-        if pred and latest:
-            upsert_prediction(latest["n"]+1,pred,latest["n"],latest.get("player_first_suit"))
-    except Exception as e:
-        print("pick err", e); diag=str(e)
+    validated=validate_predictions(recheck_all=recheck)
+    score_strategies_from_validations()
+    deactivated=prune_bad_strategies()
+    created=rebuild_strategies(hands)
+    record_patterns(hands)
+    strategies=get_active_strategies()
+    pred,latest,diag=pick_prediction(hands,strategies)
+    if pred and latest:
+        upsert_prediction(latest["n"]+1,pred,latest["n"],latest.get("player_first_suit"))
     return {"validated":validated,"strategies_created":created,"deactivated":deactivated,
             "active_count":len(strategies),"prediction":pred,"latest_n":latest["n"] if latest else None,"diagnosis":diag}
 
 def fetch_page(before=None):
     url=CHANNEL_WEB+(f"?before={before}" if before else "")
-    r=requests.get(url,headers=HEADERS,timeout=12); r.raise_for_status()
+    r=requests.get(url,headers=HEADERS,timeout=20); r.raise_for_status()
     soup=BeautifulSoup(r.text,"html.parser"); messages,ids=[],[]
     for w in soup.select(".tgme_widget_message"):
         post=w.get("data-post",""); mid=None
@@ -428,9 +409,7 @@ class Handler(BaseHTTPRequestHandler):
                     (datetime.utcnow().isoformat(),len(parsed),new,"success")); c.commit(); c.close()
                 self.send_json({"status":"ok","hands_found":len(parsed),"hands_new":new,
                     "message":f"{new} nouvelles · apprentissage maj","learning":cycle,"next_prediction":cycle.get("prediction")})
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                self.send_json({"status":"error","error":str(e),"hint":"Telegram inaccessible depuis le serveur?"},500)
+            except Exception as e: self.send_json({"status":"error","error":str(e)},500)
         elif path=="/api/learn":
             self.send_json({"status":"ok","learning":run_learning_cycle(recheck=True)})
         else: self.send_json({"error":"Not found"},404)
@@ -468,11 +447,6 @@ h1{font-family:Cinzel,serif;font-size:clamp(1.3rem,4vw,1.85rem);font-weight:900;
 .pred-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
 .suit-big{font-size:3.4rem;line-height:1}
 .pname{font-family:Cinzel,serif;font-size:1.1rem;font-weight:900;color:var(--gold)}
-.btn-copy-pred{margin-top:8px;border:1px solid var(--gold-dim);background:#1a1010;color:var(--gold);
-  padding:6px 12px;border-radius:4px;font-family:Cinzel,serif;font-size:.65rem;letter-spacing:.08em;
-  cursor:pointer;text-transform:uppercase}
-.btn-copy-pred:hover{border-color:var(--gold);background:#2a1810}
-.btn-copy-pred.ok{background:#1a2a18;border-color:var(--ok);color:var(--ok)}
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .metric{background:#12080c;border-radius:4px;padding:7px;border:1px solid var(--border)}
 .metric span{display:block;font-size:.55rem;text-transform:uppercase;color:var(--muted)}.metric b{font-size:.9rem}
@@ -515,13 +489,13 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 </style></head><body><div class="shell">
 <header><div style="color:var(--gold-dim);letter-spacing:.25em">♠ ♥ ♣ ♦</div>
 <h1>XCODE SUIT CARD</h1>
-<div class="sub">Auto-apprenant · pred des P1 suffisant · cartes live · bascule strategies</div></header>
+<div class="sub">Auto-apprenant · enseigne JOUEUR · bascule strategies</div></header>
 
 <section class="panel gt"><div class="ph"><div><div class="ey">Telegram</div><div class="title">@statistika_baccara LIVE</div></div>
 <span class="pill" id="live-badge">OFF</span></div>
 <div class="pb">
 <button class="btn-demarrer off" id="btn-live" onclick="toggleLive()">DEMARRER LIVE</button>
-<div class="demarrer-desc">Scan 4s · pred des cartes P1 connues (2 ou 3) · pas besoin fin de main · vigilance 3-3</div>
+<div class="demarrer-desc">Scan 8s · collecte + validation + rescoring + bascule si decroche</div>
 <div class="live-status" id="live-status">LIVE arrete.</div>
 <div class="btn-row">
 <button class="act pri" onclick="collect(8)">Collecter 8</button>
@@ -543,10 +517,9 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 <div class="box"><div class="ey">BANKER</div><div class="cards" id="bc" style="margin-top:5px">—</div>
 <div style="margin-top:8px" class="ey">Cadence</div><b>~60 min</b></div>
 </div><div class="note" id="alert33">Main 3-3 — vigilance algo.</div></div></div>
-<div class="panel gt"><div class="ph"><div><div class="ey">Prediction live</div><div class="title">Prochain JOUEUR (des P1 connu)</div></div><span class="pill" id="strat">AUTO</span></div>
+<div class="panel gt"><div class="ph"><div><div class="ey">Prediction</div><div class="title">Prochain JOUEUR</div></div><span class="pill" id="strat">AUTO</span></div>
 <div class="pb"><div class="pred-row"><div class="suit-big" id="ps">—</div>
-<div><div class="ey">Enseigne</div><div class="pname" id="pn">En attente</div><span class="pill" id="target">Cible —</span>
-<button type="button" class="btn-copy-pred" id="btn-copy-one" onclick="copyOnePred()">⧉ COPIER #N…</button></div></div>
+<div><div class="ey">Enseigne</div><div class="pname" id="pn">En attente</div><span class="pill" id="target">Cible —</span></div></div>
 <div class="metrics">
 <div class="metric"><span>Taux</span><b id="rate">—</b></div><div class="metric"><span>Marge</span><b id="margin">—</b></div>
 <div class="metric"><span>Echantillon</span><b id="sample">—</b></div><div class="metric"><span>Confiance</span><b id="conf">—</b></div>
@@ -571,64 +544,43 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 <div style="margin-top:10px" class="ey">Schemas</div><div class="patterns" id="patterns" style="margin-top:5px">—</div>
 <div class="out" id="out">collecter → valider → scorer → pruner → predire</div></div></section>
 </div>
-<div class="foot">VALID = enseigne predite PARMI les cartes P1 · pred des P1 connu · bascule si real_rate &lt; 22%</div>
+<div class="foot">Bascule si real_rate &lt; 22% · stockage serveur</div>
 </div>
 <script>
 const sm={H:'♥',D:'♦',S:'♠',C:'♣'},sn={H:'Coeur',D:'Carreau',S:'Pique',C:'Trefle'};
 const red=s=>s==='H'||s==='D';
 const tx=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v??'—'};
 const card=(lab,s)=>`<div class="card ${red(s)?'red':''}"><strong>${lab}</strong><small>${sm[s]||s}</small></div>`;
-async function j(u,o){
-  const ctrl=new AbortController();
-  const ms=(o&&o.timeout)||25000;
-  const to=setTimeout(()=>ctrl.abort(),ms);
-  try{
-    const r=await fetch(u,Object.assign({},o||{},{signal:ctrl.signal}));
-    clearTimeout(to);
-    const txt=await r.text();
-    try{return JSON.parse(txt)}catch(e){throw new Error('Reponse invalide HTTP '+r.status)}
-  }catch(e){
-    clearTimeout(to);
-    if(e.name==='AbortError')throw new Error('Timeout '+ms/1000+'s — Telegram lent ou bloque');
-    throw e;
-  }
-}
+async function j(u,o){return(await fetch(u,o)).json()}
 let liveOn=false,liveTimer=null,liveBusy=false;
 function setLiveUI(on){const b=document.getElementById('btn-live'),g=document.getElementById('live-badge');
 if(on){b.textContent='LIVE AUTO ACTIF';b.classList.remove('off');g.innerHTML='<span class="dot"></span>LIVE'}
 else{b.textContent='DEMARRER LIVE';b.classList.add('off');g.textContent='OFF'}}
 function toggleLive(){if(liveOn){liveOn=false;if(liveTimer){clearInterval(liveTimer);liveTimer=null}setLiveUI(false);tx('live-status','LIVE arrete.');return}
-liveOn=true;setLiveUI(true);tx('live-status','LIVE…');runLiveTick();liveTimer=setInterval(runLiveTick,4000)}
-async function runLiveTick(){
-if(liveBusy)return;liveBusy=true;
-tx('live-status','Collecte + learn…');
-try{
-  const d=await j('/api/collect?pages=2',{method:'POST',timeout:35000});
-  await refreshAll();
-  if(d&&d.status==='error'){tx('live-status','Collecte: '+(d.error||'erreur'));}
-  else{
-    const L=(d&&d.learning)||{};
-    let m='+'+(d&&d.hands_new!=null?d.hands_new:0)+' nouvelles · '+(L.active_count||0)+' strat';
-    if(d&&d.next_prediction)m+=' · pred '+(d.next_prediction.symbol||'');
-    if(d&&d.hands_found!=null)m+=' · vus '+d.hands_found;
-    tx('live-status',m);
-  }
-}catch(e){
-  tx('live-status','Erreur: '+e.message);
-  try{await refreshAll()}catch(e2){}
-}finally{liveBusy=false}
-}
+liveOn=true;setLiveUI(true);tx('live-status','LIVE…');runLiveTick();liveTimer=setInterval(runLiveTick,8000)}
+async function runLiveTick(){if(liveBusy)return;liveBusy=true;try{tx('live-status','Collecte + learn…');
+const d=await j('/api/collect?pages=4',{method:'POST'});await refreshAll();
+const L=d.learning||{};let m=d.status==='ok'?`+${d.hands_new||0} · ${L.active_count||0} actives`:'Err';
+if(L.deactivated&&L.deactivated.length)m+=' · '+L.deactivated.length+' coupees';tx('live-status',m)}
+catch(e){tx('live-status','Err '+e.message)}finally{liveBusy=false}}
+function fillLiveTable(hands,preds){const tb=document.getElementById('lt-body'),ct=document.getElementById('lt-count');
+if(!tb)return;const map={};(preds||[]).forEach(p=>map[p.target_n]=p);
+const rows=(hands||[]).slice().sort((a,b)=>b.n-a.n).slice(0,25);
+if(!rows.length){tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:12px">Vide</td></tr>';if(ct)ct.textContent='0';return}
+const latest=rows[0]&&rows[0].n;
+tb.innerHTML=rows.map(h=>{const pS=(h.player_suits||'').split(',').filter(Boolean),bS=(h.banker_suits||'').split(',').filter(Boolean);
+const fmt=h.format||(pS.length+'-'+bS.length);const pred=map[h.n];let st='—',cl='lt-pend',ps='—';
+if(pred){ps=sm[pred.prediction_suit]||pred.prediction_suit;if(pred.status==='VALID'){st='OK';cl='lt-ok'}else if(pred.status==='INVALID'){st='KO';cl='lt-ko'}else{st='…';cl='lt-pend'}}
+return `<tr class="${h.n===latest?'now':''}"><td class="lt-num">#N${h.n}</td><td>${pS.map(s=>sm[s]||s).join(' ')||'—'}</td><td>${bS.map(s=>sm[s]||s).join(' ')||'—'}</td><td>${fmt}</td><td>${ps}</td><td class="${cl}">${st}</td></tr>`}).join('');
+if(ct)ct.textContent=rows.length+' jeux'}
 async function refreshAll(){try{
 const [l,h,p,st,hands,stR]=await Promise.all([j('/api/live'),j('/api/predictions?limit=200'),j('/api/patterns?limit=15'),j('/api/stats/overview'),j('/api/hands?limit=30'),j('/api/strategies')]);
 const x=l.latest;tx('clock',new Date().toLocaleTimeString());
 if(x){tx('gn','#N'+x.n);document.getElementById('pc').innerHTML=(x.player_suits||'').split(',').filter(Boolean).map((s,i)=>card('P'+(i+1),s)).join('')||'—';
 document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—';
-tx('fmt',x.format||'?');const nP=(x.player_suits||'').split(',').filter(Boolean).length;const fmtEl=document.getElementById('fmt');if(fmtEl&&nP>=2)fmtEl.innerHTML=(x.format||(nP+'-?'))+' <span style="color:var(--ok)">· P1 OK</span>';const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none';
-if(x.is_33){const ls=document.getElementById('live-status');if(ls&&!ls.textContent.includes('3-3'))ls.textContent=(ls.textContent||'')+' · ⚠ dernier jeu 3-3'}}
-if(!l.prediction){tx('ps','—');tx('pn','En attente');tx('target','Cible —');tx('rate','—');tx('margin','—');tx('sample','—');tx('conf','—');const b0=document.getElementById('btn-copy-one');if(b0)b0.textContent='⧉ COPIER #N…';}if(l.prediction){const q=l.prediction;const p1n=(x&&x.player_suits)?x.player_suits.split(',').filter(Boolean).length:0;if(p1n>=2){const rs=document.getElementById('live-status');if(rs&&!String(rs.textContent).includes('P1 pret'))rs.textContent='P1 pret ('+p1n+' cartes) → pred #N'+(l.prediction_target_n||'?')+' emise';}tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
-tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');
-window._lastPredTxt='#N'+l.prediction_target_n+(q.symbol||sm[q.suit]||q.suit||'');
-const b1=document.getElementById('btn-copy-one');if(b1)b1.textContent='⧉ COPIER '+window._lastPredTxt;tx('rate',q.hit_rate+'%');
+tx('fmt',x.format||'?');const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none'}
+if(l.prediction){const q=l.prediction;tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
+tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');tx('rate',q.hit_rate+'%');
 tx('margin',(q.margin>=0?'+':'')+q.margin);tx('sample',q.sample);tx('conf',Math.round((q.confidence||0)*100)+'%');
 const pn=document.getElementById('pnote');if(q.note){pn.style.display='block';pn.textContent=q.note}else{pn.style.display='none'}}
 const ps=l.pred_stats||{};tx('total',st.total_hands);tx('preds',ps.total||h.length);tx('valid',ps.valid||0);tx('invalid',ps.invalid||0);
@@ -646,33 +598,10 @@ if(l.learning&&l.learning.diagnosis)tx('out','Diag: '+l.learning.diagnosis);
 }catch(e){tx('out','Err '+e)}}
 async function collect(n){tx('out','Collecte…');try{const d=await j('/api/collect?pages='+n,{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
 async function learn(){tx('out','Learn…');try{const d=await j('/api/learn',{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
-async function copyOnePred(){
-  const txt=window._lastPredTxt||'';
-  if(!txt){alert('Pas de prediction');return}
-  try{
-    await navigator.clipboard.writeText(txt);
-    const b=document.getElementById('btn-copy-one');
-    if(b){const o=b.textContent;b.textContent='✓ COPIE';b.classList.add('ok');setTimeout(()=>{b.textContent=o;b.classList.remove('ok')},1200)}
-  }catch(e){alert('Copie impossible')}
-}
 async function copyPred(){try{const h=await j('/api/predictions?limit=300');
 const t=h.map(x=>`#N${x.target_n} | ${sm[x.prediction_suit]||x.prediction_suit} | ${x.strategy||'-'} | ${x.hit_rate}% | ${x.status} | ${(x.actual_first_suit||'').split(',').map(s=>sm[s]||s).filter(Boolean).join(' ')||'-'}`).join('\n');
 await navigator.clipboard.writeText(t||'Vide')}catch(e){alert('Copie KO')}}
-refreshAll();
-setInterval(refreshAll,3000);
-// si base vide au demarrage, une collecte legere
-setTimeout(async()=>{
-  try{
-    const st=await j('/api/stats/overview',{timeout:8000});
-    if(st&&(st.total_hands||0)<3){
-      tx('live-status','Base vide — premiere collecte…');
-      const d=await j('/api/collect?pages=5',{method:'POST',timeout:45000});
-      await refreshAll();
-      tx('live-status',d.status==='ok'?('Init +'+(d.hands_new||0)+' mains'):('Init: '+(d.error||'ko')));
-    }
-  }catch(e){tx('live-status','Init: '+e.message)}
-},800);
-
+refreshAll();setInterval(refreshAll,5000);
 </script></body></html>
 """
 
