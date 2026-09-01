@@ -11,17 +11,143 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import requests
 from bs4 import BeautifulSoup
+import secrets, string
+from datetime import timedelta
 
-# --- Licence system ---
-try:
-    from license_system import (
-        ADMIN_SECRET, init_license_tables, create_batch,
-        activate_license, check_license, list_batches, get_batch_codes
-    )
-    HAS_LICENSE = True
-except ImportError:
-    HAS_LICENSE = False
-    ADMIN_SECRET = "XCODE-ADMIN-2026-CHANGE-ME"
+# ═══ LICENCE SYSTEM ═══
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "XCODE-ADMIN-2026-CHANGE-ME")
+DURATIONS = {
+    "5m":  {"seconds": 5*60, "label": "5 minutes"},
+    "10m": {"seconds": 10*60, "label": "10 minutes"},
+    "20m": {"seconds": 20*60, "label": "20 minutes"},
+    "1d":  {"seconds": 24*3600, "label": "1 jour"},
+    "2d":  {"seconds": 2*24*3600, "label": "2 jours"},
+    "3d":  {"seconds": 3*24*3600, "label": "3 jours"},
+    "8d":  {"seconds": 8*24*3600, "label": "8 jours"},
+    "31d": {"seconds": 31*24*3600, "label": "31 jours"},
+}
+CODES_PER_BATCH = 40
+CODE_LENGTH = 14
+
+def gen_code():
+    alphabet = string.ascii_uppercase + string.digits
+    alphabet = alphabet.replace("O","").replace("0","").replace("I","").replace("1","")
+    return "".join(secrets.choice(alphabet) for _ in range(CODE_LENGTH))
+
+def init_license_tables():
+    c = get_conn()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS license_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        duration_key TEXT NOT NULL, duration_seconds INTEGER NOT NULL,
+        label TEXT NOT NULL, created_at TEXT NOT NULL, note TEXT);
+    CREATE TABLE IF NOT EXISTS licenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER NOT NULL,
+        code TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'unused',
+        device_id TEXT, activated_at TEXT, expires_at TEXT, last_seen TEXT,
+        created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_lic_code ON licenses(code);
+    CREATE INDEX IF NOT EXISTS idx_lic_device ON licenses(device_id);
+    """)
+    c.commit(); c.close()
+
+def create_batch(duration_key, note=""):
+    if duration_key not in DURATIONS:
+        raise ValueError("Duree inconnue: "+duration_key)
+    info = DURATIONS[duration_key]
+    now = datetime.utcnow().isoformat()
+    c = get_conn()
+    cur = c.execute("INSERT INTO license_batches (duration_key,duration_seconds,label,created_at,note) VALUES (?,?,?,?,?)",
+                    (duration_key, info["seconds"], info["label"], now, note or ""))
+    batch_id = cur.lastrowid
+    codes = []
+    for _ in range(CODES_PER_BATCH):
+        while True:
+            code = gen_code()
+            try:
+                c.execute("INSERT INTO licenses (batch_id,code,status,created_at) VALUES (?,?,?,?)",
+                          (batch_id, code, "unused", now))
+                codes.append(code); break
+            except sqlite3.IntegrityError: continue
+    c.commit(); c.close()
+    return {"batch_id": batch_id, "duration_key": duration_key, "label": info["label"],
+            "seconds": info["seconds"], "codes": codes, "count": len(codes)}
+
+def activate_license(code, device_id):
+    code = (code or "").strip().upper()
+    device_id = (device_id or "").strip()
+    if not code or not device_id or len(device_id) < 8:
+        return {"ok": False, "error": "Code ou device_id manquant"}
+    c = get_conn()
+    row = c.execute("SELECT * FROM licenses WHERE code=?", (code,)).fetchone()
+    if not row:
+        c.close(); return {"ok": False, "error": "Code invalide"}
+    now = datetime.utcnow(); now_iso = now.isoformat()
+    if row["status"] == "active" and row["device_id"] and row["device_id"] != device_id:
+        c.close(); return {"ok": False, "error": "Mot de passe deja utilise sur un autre appareil"}
+    if row["status"] == "active" and row["device_id"] == device_id:
+        expires = datetime.fromisoformat(row["expires_at"])
+        if expires <= now:
+            c.execute("UPDATE licenses SET status='expired' WHERE id=?", (row["id"],))
+            c.commit(); c.close()
+            return {"ok": False, "error": "Licence expiree"}
+        c.execute("UPDATE licenses SET last_seen=? WHERE id=?", (now_iso, row["id"]))
+        c.commit(); remaining = int((expires-now).total_seconds()); c.close()
+        return {"ok": True, "status": "active", "code": code, "expires_at": row["expires_at"],
+                "remaining_seconds": remaining, "device_id": device_id, "reactivated": True}
+    if row["status"] in ("expired", "revoked"):
+        c.close(); return {"ok": False, "error": "Licence "+row["status"]}
+    batch = c.execute("SELECT * FROM license_batches WHERE id=?", (row["batch_id"],)).fetchone()
+    if not batch:
+        c.close(); return {"ok": False, "error": "Lot introuvable"}
+    expires = now + timedelta(seconds=batch["duration_seconds"])
+    expires_iso = expires.isoformat()
+    c.execute("UPDATE licenses SET status='active',device_id=?,activated_at=?,expires_at=?,last_seen=? WHERE id=? AND status='unused'",
+              (device_id, now_iso, expires_iso, now_iso, row["id"]))
+    if c.total_changes == 0:
+        c.close(); return {"ok": False, "error": "Activation concurrente"}
+    c.commit(); c.close()
+    return {"ok": True, "status": "active", "code": code, "expires_at": expires_iso,
+            "remaining_seconds": batch["duration_seconds"], "device_id": device_id,
+            "label": batch["label"], "first_activation": True}
+
+def check_license(device_id):
+    device_id = (device_id or "").strip()
+    if not device_id: return {"ok": False, "error": "device_id manquant"}
+    c = get_conn()
+    row = c.execute("SELECT * FROM licenses WHERE device_id=? AND status='active' ORDER BY activated_at DESC LIMIT 1", (device_id,)).fetchone()
+    if not row:
+        c.close(); return {"ok": False, "error": "Aucune licence active"}
+    now = datetime.utcnow()
+    expires = datetime.fromisoformat(row["expires_at"])
+    if expires <= now:
+        c.execute("UPDATE licenses SET status='expired' WHERE id=?", (row["id"],))
+        c.commit(); c.close()
+        return {"ok": False, "error": "Licence expiree", "expired": True}
+    remaining = int((expires-now).total_seconds())
+    c.execute("UPDATE licenses SET last_seen=? WHERE id=?", (now.isoformat(), row["id"]))
+    c.commit(); c.close()
+    return {"ok": True, "status": "active", "code": row["code"], "expires_at": row["expires_at"],
+            "remaining_seconds": remaining, "device_id": device_id}
+
+def list_batches(limit=50):
+    c = get_conn()
+    rows = c.execute("""SELECT b.*,
+        (SELECT COUNT(*) FROM licenses l WHERE l.batch_id=b.id) as total,
+        (SELECT COUNT(*) FROM licenses l WHERE l.batch_id=b.id AND l.status='unused') as unused,
+        (SELECT COUNT(*) FROM licenses l WHERE l.batch_id=b.id AND l.status='active') as active,
+        (SELECT COUNT(*) FROM licenses l WHERE l.batch_id=b.id AND l.status='expired') as expired
+        FROM license_batches b ORDER BY b.id DESC LIMIT ?""", (limit,)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+def get_batch_codes(batch_id):
+    c = get_conn()
+    batch = c.execute("SELECT * FROM license_batches WHERE id=?", (batch_id,)).fetchone()
+    if not batch: c.close(); return None
+    codes = c.execute("SELECT code,status,device_id,activated_at,expires_at FROM licenses WHERE batch_id=? ORDER BY id", (batch_id,)).fetchall()
+    c.close()
+    return {"batch": dict(batch), "codes": [dict(x) for x in codes]}
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -635,8 +761,46 @@ class Handler(BaseHTTPRequestHandler):
         body=html.encode("utf-8"); self.send_response(200)
         self.send_header("Content-Type","text/html; charset=utf-8")
         self.send_header("Content-Length",len(body)); self.end_headers(); self.wfile.write(body)
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length <= 0: return {}
+        try: return json.loads(self.rfile.read(length).decode("utf-8"))
+        except: return {}
+    def _device_id(self):
+        did = self.headers.get("X-Device-Id") or ""
+        if not did:
+            qs = parse_qs(urlparse(self.path).query)
+            did = (qs.get("device_id") or [""])[0]
+        return did
+    def _require_license(self):
+        res = check_license(self._device_id())
+        return res.get("ok", False), res
     def do_GET(self):
         path=urlparse(self.path).path; qs=parse_qs(urlparse(self.path).query)
+        # Pages publiques
+        if path in ("/","/index.html","/login"):
+            self.send_html(LOGIN_PAGE); return
+        if path == "/dashboard":
+            self.send_html(DASHBOARD); return
+        if path == "/admin":
+            self.send_html(ADMIN_PAGE); return
+        if path == "/api/license/status":
+            self.send_json(check_license(self._device_id())); return
+        if path == "/api/admin/batches":
+            secret = self.headers.get("X-Admin-Secret") or (qs.get("secret") or [""])[0]
+            if secret != ADMIN_SECRET: self.send_json({"error":"Admin secret invalide"},403); return
+            self.send_json({"batches": list_batches(100)}); return
+        if path == "/api/admin/batch":
+            secret = self.headers.get("X-Admin-Secret") or (qs.get("secret") or [""])[0]
+            if secret != ADMIN_SECRET: self.send_json({"error":"Admin secret invalide"},403); return
+            bid = int((qs.get("id") or [0])[0])
+            data = get_batch_codes(bid)
+            self.send_json(data if data else {"error":"Batch introuvable"}, 200 if data else 404); return
+        # Protection API
+        if path.startswith("/api/"):
+            ok, lic = self._require_license()
+            if not ok:
+                self.send_json({"error":"Licence requise","detail":lic.get("error","")},403); return
         if path in ("/","/index.html"): self.send_html(DASHBOARD)
         elif path=="/api/stats/overview": self.send_json(get_stats())
         elif path=="/api/analysis/full": self.send_json(analyze_report(get_all_hands()))
@@ -666,6 +830,25 @@ class Handler(BaseHTTPRequestHandler):
         else: self.send_json({"error":"Not found"},404)
     def do_POST(self):
         path=urlparse(self.path).path; qs=parse_qs(urlparse(self.path).query)
+        body = self._read_json()
+        if path == "/api/license/activate":
+            code = body.get("code") or (qs.get("code") or [""])[0]
+            device_id = body.get("device_id") or self._device_id()
+            res = activate_license(code, device_id)
+            self.send_json(res, 200 if res.get("ok") else 400); return
+        if path == "/api/admin/generate":
+            secret = self.headers.get("X-Admin-Secret") or body.get("secret") or (qs.get("secret") or [""])[0]
+            if secret != ADMIN_SECRET: self.send_json({"error":"Admin secret invalide"},403); return
+            try:
+                batch = create_batch(body.get("duration") or (qs.get("duration") or [""])[0], body.get("note") or "")
+                self.send_json({"status":"ok","batch":batch})
+            except Exception as e:
+                self.send_json({"status":"error","error":str(e)},400)
+            return
+        # Protection
+        ok, lic = self._require_license()
+        if not ok:
+            self.send_json({"error":"Licence requise","detail":lic.get("error","")},403); return
         if path=="/api/collect":
             pages=int(qs.get("pages",[8])[0]); print(f"=== Collecte {pages} pages ===")
             try:
@@ -680,6 +863,124 @@ class Handler(BaseHTTPRequestHandler):
         elif path=="/api/learn":
             self.send_json({"status":"ok","learning":run_learning_cycle(recheck=True)})
         else: self.send_json({"error":"Not found"},404)
+
+
+LOGIN_PAGE = r"""<!doctype html><html lang="fr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xcode Suit Card — Accès</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Rajdhani:wght@400;600;700&display=swap');
+:root{--card:#1a0e12;--gold:#d4a84b;--gold-dim:#a07830;--ivory:#f0e6d0;--muted:#a89878;--ok:#5ecf9a;--bad:#e07080;--border:#3a2028}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:radial-gradient(ellipse at 30% 20%,#2a1018 0%,#0c0608 60%);color:var(--ivory);font-family:Rajdhani,system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.box{background:var(--card);border:1px solid var(--border);border-top:3px solid var(--gold);border-radius:10px;padding:32px 28px;max-width:420px;width:100%}
+h1{font-family:Cinzel,serif;font-size:1.5rem;color:var(--gold);text-align:center;margin-bottom:6px}
+.sub{text-align:center;font-size:.72rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;margin-bottom:28px}
+label{display:block;font-size:.7rem;color:var(--gold-dim);text-transform:uppercase;margin-bottom:6px}
+input{width:100%;padding:14px 16px;border-radius:6px;border:1px solid var(--border);background:#12080c;color:var(--ivory);font-size:1.05rem;letter-spacing:.12em;text-transform:uppercase;outline:none}
+input:focus{border-color:var(--gold)}
+button{width:100%;margin-top:18px;padding:14px;border-radius:6px;border:2px solid var(--gold);background:linear-gradient(180deg,#8b2240,#5a1228);color:var(--gold);font-family:Cinzel,serif;font-size:.95rem;font-weight:700;cursor:pointer;text-transform:uppercase}
+button:disabled{opacity:.5}
+.msg{margin-top:14px;padding:10px 12px;border-radius:5px;font-size:.82rem;display:none}
+.msg.err{background:#2a1218;border:1px solid #6a3038;color:var(--bad);display:block}
+.msg.ok{background:#1a2a18;border:1px solid #2a4a30;color:var(--ok);display:block}
+.foot{text-align:center;margin-top:22px;font-size:.65rem;color:#5a4048}
+</style></head><body>
+<div class="box">
+  <h1>XCODE SUIT CARD</h1>
+  <div class="sub">Accès par licence · 1 code = 1 appareil</div>
+  <label>Code d'accès</label>
+  <input id="code" type="text" maxlength="20" placeholder="XXXXXXXXXXXXXX" autocomplete="off">
+  <button id="btn" onclick="activate()">ACTIVER LA LICENCE</button>
+  <div class="msg" id="msg"></div>
+  <div class="foot">1 code = 1 téléphone uniquement</div>
+</div>
+<script>
+function getDeviceId(){
+  let id=localStorage.getItem('xcode_device_id');
+  if(id&&id.length>=12)return id;
+  const raw=[navigator.userAgent||'',screen.width+'x'+screen.height,Math.random().toString(36)].join('|');
+  let h=0;for(let i=0;i<raw.length;i++){h=((h<<5)-h)+raw.charCodeAt(i);h|=0;}
+  id='DEV'+Math.abs(h).toString(36).toUpperCase()+Date.now().toString(36).toUpperCase().slice(-6);
+  localStorage.setItem('xcode_device_id',id);return id;
+}
+async function activate(){
+  const code=(document.getElementById('code').value||'').trim().toUpperCase();
+  const msg=document.getElementById('msg'),btn=document.getElementById('btn');
+  if(!code||code.length<8){msg.className='msg err';msg.textContent='Code trop court';return;}
+  btn.disabled=true;btn.textContent='VÉRIFICATION…';
+  try{
+    const device_id=getDeviceId();
+    const r=await fetch('/api/license/activate',{method:'POST',headers:{'Content-Type':'application/json','X-Device-Id':device_id},body:JSON.stringify({code,device_id})});
+    const d=await r.json();
+    if(d.ok){msg.className='msg ok';msg.textContent='Licence activée !';setTimeout(()=>location.href='/dashboard',800);}
+    else{msg.className='msg err';msg.textContent=d.error||'Échec';btn.disabled=false;btn.textContent='ACTIVER LA LICENCE';}
+  }catch(e){msg.className='msg err';msg.textContent='Erreur: '+e.message;btn.disabled=false;btn.textContent='ACTIVER LA LICENCE';}
+}
+document.getElementById('code').addEventListener('keydown',e=>{if(e.key==='Enter')activate();});
+(async()=>{try{const d=await(await fetch('/api/license/status',{headers:{'X-Device-Id':getDeviceId()}})).json();if(d.ok)location.href='/dashboard';}catch(e){}})();
+</script></body></html>
+"""
+
+ADMIN_PAGE = r"""<!doctype html><html lang="fr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xcode Admin</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Rajdhani:wght@400;600;700&family=Courier+Prime&display=swap');
+body{background:#0c0608;color:#f0e6d0;font-family:Rajdhani,system-ui,sans-serif;padding:24px;max-width:900px;margin:auto}
+h1{font-family:Cinzel,serif;color:#d4a84b;font-size:1.4rem;margin-bottom:18px}
+.panel{background:#1a0e12;border:1px solid #3a2028;border-radius:8px;padding:18px;margin-bottom:16px}
+label{font-size:.7rem;color:#a07830;text-transform:uppercase;display:block;margin-bottom:4px}
+input,select{width:100%;padding:10px;border-radius:5px;border:1px solid #3a2028;background:#12080c;color:#f0e6d0;font-size:.95rem;margin-bottom:12px}
+button{padding:10px 18px;border-radius:5px;border:1px solid #d4a84b;background:#5a1228;color:#d4a84b;font-family:Cinzel,serif;cursor:pointer;margin-right:8px}
+.codes{font-family:'Courier Prime',monospace;font-size:.78rem;background:#12080c;padding:12px;border-radius:5px;max-height:320px;overflow:auto;white-space:pre-wrap;border:1px solid #3a2028}
+.batch{border-bottom:1px solid #2a181c;padding:8px 0;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:.85rem}
+.ok{color:#5ecf9a}.bad{color:#e07080}
+</style></head><body>
+<h1>ADMIN — Génération de lots (40 codes)</h1>
+<div class="panel">
+  <label>Secret Admin</label><input id="secret" type="password" placeholder="ADMIN_SECRET">
+  <label>Durée</label>
+  <select id="duration">
+    <option value="5m">5 minutes</option><option value="10m">10 minutes</option>
+    <option value="20m">20 minutes</option><option value="1d">1 jour</option>
+    <option value="2d">2 jours</option><option value="3d">3 jours</option>
+    <option value="8d">8 jours</option><option value="31d">31 jours</option>
+  </select>
+  <label>Note</label><input id="note" type="text" placeholder="Lot client…">
+  <button onclick="generate()">GÉNÉRER 40 CODES</button>
+  <button onclick="loadBatches()">RAFRAÎCHIR</button>
+</div>
+<div class="panel"><div id="result" class="codes">Codes ici</div></div>
+<div class="panel"><h3 style="color:#d4a84b;font-size:.9rem;margin-bottom:10px">Lots</h3><div id="batches">—</div></div>
+<script>
+async function generate(){
+  const secret=document.getElementById('secret').value,duration=document.getElementById('duration').value,note=document.getElementById('note').value;
+  const r=await fetch('/api/admin/generate',{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Secret':secret},body:JSON.stringify({duration,note,secret})});
+  const d=await r.json();
+  if(d.status==='ok'){
+    const b=d.batch; let txt='LOT #'+b.batch_id+' — '+b.label+'\n';
+    b.codes.forEach((c,i)=>txt+=String(i+1).padStart(2,'0')+'. '+c+'\n');
+    document.getElementById('result').textContent=txt; loadBatches();
+  }else document.getElementById('result').textContent='ERREUR: '+(d.error||JSON.stringify(d));
+}
+async function loadBatches(){
+  const secret=document.getElementById('secret').value;
+  const d=await(await fetch('/api/admin/batches',{headers:{'X-Admin-Secret':secret}})).json();
+  if(d.error){document.getElementById('batches').textContent=d.error;return;}
+  document.getElementById('batches').innerHTML=(d.batches||[]).map(b=>'<div class="batch"><span>#'+b.id+' · <b>'+b.label+'</b></span><span>'+b.unused+' libres · '+b.active+' actifs <button style="padding:4px 8px;font-size:.65rem" onclick="showBatch('+b.id+')">Voir</button></span></div>').join('')||'Aucun';
+}
+async function showBatch(id){
+  const secret=document.getElementById('secret').value;
+  const d=await(await fetch('/api/admin/batch?id='+id,{headers:{'X-Admin-Secret':secret}})).json();
+  if(d.error){alert(d.error);return;}
+  let txt='LOT #'+d.batch.id+' — '+d.batch.label+'\n';
+  d.codes.forEach((c,i)=>{txt+=String(i+1).padStart(2,'0')+'. '+c.code+' ['+c.status+']\n';});
+  document.getElementById('result').textContent=txt;
+}
+</script></body></html>
+"""
+
 
 DASHBOARD = r"""<!doctype html><html lang="fr"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -944,7 +1245,7 @@ def auto_collect_loop():
         except Exception as e: print(f"[AUTO] {e}")
 
 if __name__=="__main__":
-    init_db(); print(f"DB: {DB_PATH}"); print(f"http://0.0.0.0:{PORT}")
+    init_db(); init_license_tables(); print(f"DB: {DB_PATH}"); print(f"Admin: {ADMIN_SECRET}"); print(f"http://0.0.0.0:{PORT}")
     if AUTO_COLLECT_INTERVAL>0:
         threading.Thread(target=auto_collect_loop,daemon=True).start()
         print(f"Auto-collect {AUTO_COLLECT_INTERVAL}s")
