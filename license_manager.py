@@ -44,11 +44,17 @@ def db_init(c):
 
 
 def ensure_codes(c, csv_path):
-    """Import the 9 x 40 seed codes once. Never overwrites used codes."""
+    """
+    Synchronise the CSV des codes avec la base serveur.
+
+    IMPORTANT : ne pas quitter simplement parce que la base contient déjà
+    des codes. Render peut conserver baccarat.db après un déploiement ;
+    dans ce cas les nouveaux codes présents dans license_codes.csv doivent
+    quand même être importés. INSERT OR IGNORE protège les codes déjà connus
+    et ne réinitialise jamais leur état (used, appareil, expiration).
+    """
     db_init(c)
-    count = c.execute('SELECT COUNT(*) FROM license_codes').fetchone()[0]
-    if count:
-        return count
+
     if not os.path.exists(csv_path):
         os.makedirs(os.path.dirname(csv_path) or '.', exist_ok=True)
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
@@ -56,15 +62,27 @@ def ensure_codes(c, csv_path):
             w.writerow(['code','plan','duration_seconds'])
             for plan, seconds in DURATIONS.items():
                 for _ in range(CODES_PER_SESSION):
-                    code = secrets.token_urlsafe(9).replace('-', '').replace('_', '')[:12].upper()
+                    alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+                    code = ''.join(secrets.choice(alphabet) for _ in range(12))
                     w.writerow([code, plan, seconds])
+
+    imported = 0
     with open(csv_path, newline='', encoding='utf-8') as f:
         for row in csv.DictReader(f):
             try:
-                c.execute('INSERT OR IGNORE INTO license_codes(code,plan,duration_seconds) VALUES(?,?,?)',
-                          (row['code'].strip().upper(), row['plan'], int(row['duration_seconds'])))
+                code = (row.get('code') or '').strip().upper()
+                plan = (row.get('plan') or '').strip()
+                seconds = int(row.get('duration_seconds') or 0)
+                if not code or plan not in DURATIONS or seconds <= 0:
+                    continue
+                cur = c.execute(
+                    'INSERT OR IGNORE INTO license_codes(code,plan,duration_seconds) VALUES(?,?,?)',
+                    (code, plan, seconds)
+                )
+                imported += cur.rowcount
             except Exception:
-                pass
+                continue
+
     c.commit()
     return c.execute('SELECT COUNT(*) FROM license_codes').fetchone()[0]
 
