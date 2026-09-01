@@ -19,6 +19,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 PORT = int(os.environ.get("PORT", 8000))
 AUTO_COLLECT_INTERVAL = 90
 MIN_SAMPLE, MIN_RATE, DEACTIVATE_RATE, MIN_VALIDATIONS = 12, 28.0, 20.0, 6
+# Anti-série / rattrapage
+STREAK_COOLDOWN = 2          # après 1 perte, cette strat est en cooldown pendant N prochains picks
+MAX_CONSEC_LOSS_SOFT = 2     # à partir de 2 pertes d'affilée → mode prudent (2e choix)
+MAX_CONSEC_LOSS_HARD = 3     # à partir de 3 pertes → exclusion forte des strats récentes + note alerte
 SUITS = ["H", "D", "S", "C"]
 EMOJI = {"H": "♥", "D": "♦", "S": "♠", "C": "♣"}
 SUIT_NAME = {"H": "Coeur", "D": "Carreau", "S": "Pique", "C": "Trefle"}
@@ -57,9 +61,35 @@ def parse_message(text, msg_id=None):
     n,ps,pc,bs,bc,t_tag,r_tag=m.groups()
     p,b=parse_cards(pc),parse_cards(bc)
     if not p and not b: return None
-    return {"n":int(n),"player_score":int(ps),"banker_score":int(bs),"player_cards":p,"banker_cards":b,
-            "t_tag":t_tag,"is_r":bool(r_tag),"message_id":msg_id,"raw":text.strip(),
-            "format":f"{len(p)}-{len(b)}","is_33":len(p)==3 and len(b)==3,"is_22":len(p)==2 and len(b)==2,"player_drew_3":len(p)==3}
+    # Live incompleteness: arrow ▶ means Player is still drawing a 3rd card
+    has_live_arrow = bool(re.search(r"[▶►→>]", text))
+    n_p, n_b = len(p), len(b)
+    # Player hand is COMPLETE when:
+    #  - final post with #T tag, OR
+    #  - player already has 3 cards, OR
+    #  - no live arrow and we have at least 2 player cards (natural 2-card stand / finished)
+    # INCOMPLETE when: live arrow present (P still drawing) and player has only 2 cards
+    player_complete = False
+    if n_p >= 3:
+        player_complete = True
+    elif t_tag:
+        player_complete = True  # message finalisé
+    elif not has_live_arrow and n_p >= 2:
+        player_complete = True  # format 2-x sans ▶ → main terminée
+    else:
+        player_complete = False  # ▶ présent + seulement 2 cartes P → attendre 3e carte
+    return {
+        "n": int(n), "player_score": int(ps), "banker_score": int(bs),
+        "player_cards": p, "banker_cards": b,
+        "t_tag": t_tag, "is_r": bool(r_tag), "message_id": msg_id, "raw": text.strip(),
+        "format": f"{n_p}-{n_b}",
+        "is_33": n_p == 3 and n_b == 3,
+        "is_22": n_p == 2 and n_b == 2,
+        "player_drew_3": n_p == 3,
+        "has_live_arrow": has_live_arrow,
+        "player_complete": player_complete,
+        "is_incomplete": not player_complete,
+    }
 
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
@@ -108,7 +138,11 @@ def init_db():
     """)
     try:
         cols={r[1] for r in c.execute("PRAGMA table_info(hands)")}
-        for col,typ in [("format","TEXT"),("is_33","INTEGER DEFAULT 0"),("is_22","INTEGER DEFAULT 0"),("player_drew_3","INTEGER DEFAULT 0")]:
+        for col,typ in [
+            ("format","TEXT"),("is_33","INTEGER DEFAULT 0"),("is_22","INTEGER DEFAULT 0"),
+            ("player_drew_3","INTEGER DEFAULT 0"),("player_complete","INTEGER DEFAULT 1"),
+            ("is_incomplete","INTEGER DEFAULT 0"),
+        ]:
             if col not in cols: c.execute(f"ALTER TABLE hands ADD COLUMN {col} {typ}")
         pcols={r[1] for r in c.execute("PRAGMA table_info(predictions)")}
         if "strategy_id" not in pcols: c.execute("ALTER TABLE predictions ADD COLUMN strategy_id INTEGER")
@@ -117,27 +151,55 @@ def init_db():
     c.commit(); c.close()
 
 def upsert_hands(parsed_list):
-    c=get_conn(); existing={r[0] for r in c.execute("SELECT n FROM hands")}; new=0
+    """
+    Insert nouvelles mains. Si #N existe déjà mais la nouvelle version a PLUS de cartes
+    joueur (passage 2→3 après tirage), on MET À JOUR (main complète).
+    """
+    c=get_conn()
+    existing={r[0]: r[1] for r in c.execute("SELECT n, player_card_count FROM hands")}
+    new=0
     for h in parsed_list:
-        if h["n"] in existing: continue
         p,b=h["player_cards"],h["banker_cards"]
+        n_p,n_b=len(p),len(b)
+        p_suits=",".join(x["suit"] for x in p)
+        b_suits=",".join(x["suit"] for x in b)
+        p_complete=1 if h.get("player_complete", True) else 0
+        is_inc=0 if p_complete else 1
+        core=(
+            h["player_score"],h["banker_score"],p_suits,b_suits,
+            p[0]["suit"] if p else None,b[0]["suit"] if b else None,
+            p[0]["color"] if p else None,b[0]["color"] if b else None,
+            p[0]["value"] if p else None,b[0]["value"] if b else None,
+            sum(1 for x in p if x["color"]=="R"),sum(1 for x in p if x["color"]=="B"),
+            sum(1 for x in b if x["color"]=="R"),sum(1 for x in b if x["color"]=="B"),
+            h["t_tag"],1 if h["is_r"] else 0,n_p,n_b,
+            h.get("format"),1 if h.get("is_33") else 0,1 if h.get("is_22") else 0,1 if h.get("player_drew_3") else 0,
+            p_complete,is_inc,
+            h.get("message_id"),datetime.utcnow().isoformat(),"web"
+        )
+        if h["n"] in existing:
+            old_count=existing[h["n"]] or 0
+            # Update if more player cards (2→3) OR final tag appears OR becoming complete
+            if n_p > old_count or h.get("t_tag") or p_complete:
+                c.execute("""UPDATE hands SET
+                    player_score=?,banker_score=?,player_suits=?,banker_suits=?,
+                    player_first_suit=?,banker_first_suit=?,player_first_color=?,banker_first_color=?,
+                    player_first_val=?,banker_first_val=?,player_red=?,player_black=?,banker_red=?,banker_black=?,
+                    t_tag=?,is_r=?,player_card_count=?,banker_card_count=?,format=?,is_33=?,is_22=?,player_drew_3=?,
+                    player_complete=?,is_incomplete=?,
+                    message_id=?,collected_at=?,source=? WHERE n=?""",
+                    core+(h["n"],))
+            continue
         c.execute("""INSERT INTO hands (n,player_score,banker_score,player_suits,banker_suits,
             player_first_suit,banker_first_suit,player_first_color,banker_first_color,
             player_first_val,banker_first_val,player_red,player_black,banker_red,banker_black,
             t_tag,is_r,player_card_count,banker_card_count,format,is_33,is_22,player_drew_3,
-            message_id,collected_at,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (h["n"],h["player_score"],h["banker_score"],
-             ",".join(x["suit"] for x in p),",".join(x["suit"] for x in b),
-             p[0]["suit"] if p else None,b[0]["suit"] if b else None,
-             p[0]["color"] if p else None,b[0]["color"] if b else None,
-             p[0]["value"] if p else None,b[0]["value"] if b else None,
-             sum(1 for x in p if x["color"]=="R"),sum(1 for x in p if x["color"]=="B"),
-             sum(1 for x in b if x["color"]=="R"),sum(1 for x in b if x["color"]=="B"),
-             h["t_tag"],1 if h["is_r"] else 0,len(p),len(b),
-             h.get("format"),1 if h.get("is_33") else 0,1 if h.get("is_22") else 0,1 if h.get("player_drew_3") else 0,
-             h.get("message_id"),datetime.utcnow().isoformat(),"web"))
+            player_complete,is_incomplete,
+            message_id,collected_at,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (h["n"],)+core)
         new+=1
-    c.commit(); c.close(); return new
+    c.commit(); c.close()
+    return new
 
 def get_stats():
     c=get_conn()
@@ -212,6 +274,22 @@ def prune_bad_strategies():
             reason=f"real_rate={r['real_rate']}% < {DEACTIVATE_RATE}% sur {r['real_total']} val"
             c.execute("UPDATE strategies SET is_active=0,deactivated_reason=?,updated_at=? WHERE id=?",(reason,now,r["id"]))
             deactivated.append({"name":r["name"],"reason":reason})
+    # Coupe rapide : 3 pertes d'affilée sur la même strat (même si sample encore petit)
+    hist=c.execute("""SELECT strategy,status FROM predictions
+        WHERE status IN ('VALID','INVALID') AND strategy IS NOT NULL
+        ORDER BY target_n DESC LIMIT 40""").fetchall()
+    by_strat=defaultdict(list)
+    for h in hist:
+        by_strat[h["strategy"]].append(h["status"])
+    for name, statuses in by_strat.items():
+        # 3 INVALID consécutifs en tête
+        if len(statuses)>=3 and all(s=="INVALID" for s in statuses[:3]):
+            row=c.execute("SELECT id,is_active FROM strategies WHERE name=?",(name,)).fetchone()
+            if row and row["is_active"]:
+                reason=f"3 pertes d'affilée récentes — coupe temporaire"
+                c.execute("UPDATE strategies SET is_active=0,deactivated_reason=?,updated_at=? WHERE id=?",
+                          (reason,now,row["id"]))
+                deactivated.append({"name":name,"reason":reason})
     c.commit(); c.close(); return deactivated
 
 def get_active_strategies(limit=25):
@@ -227,36 +305,128 @@ def get_all_strategies(limit=50):
         CASE WHEN real_total>=? THEN real_rate ELSE hist_rate END DESC LIMIT ?""",(MIN_VALIDATIONS,limit)).fetchall()
     c.close(); return [dict(r) for r in rows]
 
+def get_recent_pred_outcomes(limit=12):
+    """Retourne l'historique récent des prédictions validées (du plus récent au plus ancien)."""
+    c=get_conn()
+    rows=c.execute("""SELECT target_n, prediction_suit, strategy, status
+        FROM predictions WHERE status IN ('VALID','INVALID')
+        ORDER BY target_n DESC LIMIT ?""",(limit,)).fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+def consecutive_losses(hist):
+    """Nombre de pertes d'affilée en tête d'historique (VALID/INVALID)."""
+    n=0
+    for h in hist:
+        if h["status"]=="INVALID": n+=1
+        else: break
+    return n
+
+def strategies_on_cooldown(hist, cooldown=STREAK_COOLDOWN):
+    """
+    Stratégies qui ont perdu récemment → cooldown.
+    Une strat qui vient de perdre est exclue pendant `cooldown` picks suivants.
+    """
+    banned=set()
+    # Dernière utilisation de chaque strat dans l'historique
+    seen_since_loss={}
+    for i,h in enumerate(hist):
+        name=h.get("strategy")
+        if not name: continue
+        if name in seen_since_loss: continue
+        if h["status"]=="INVALID":
+            # Perte → cooldown si on est encore dans la fenêtre
+            if i < cooldown:
+                banned.add(name)
+            seen_since_loss[name]=i
+        else:
+            seen_since_loss[name]=i
+    return banned
+
 def pick_prediction(hands, strategies):
     if not hands: return None, None, "Aucune main"
     latest=hands[-1]
+    hist=get_recent_pred_outcomes(12)
+    consec=consecutive_losses(hist)
+    banned=strategies_on_cooldown(hist, STREAK_COOLDOWN)
+
+    # Mode rattrapage
+    recovery_soft = consec >= MAX_CONSEC_LOSS_SOFT
+    recovery_hard = consec >= MAX_CONSEC_LOSS_HARD
+
     if not strategies:
         pf=Counter(h["player_first_suit"] for h in hands if h.get("player_first_suit"))
         if not pf: return None, latest, "Pas de data"
         best_s=pf.most_common(1)[0][0]; total=sum(pf.values()); rate=round(100*pf[best_s]/total,2)
+        note="Fallback frequence"
+        if recovery_hard: note="⚠ RATTRAPAGE (3+ pertes) · "+note
+        elif recovery_soft: note="Rattrapage (2 pertes) · "+note
         pred={"suit":best_s,"symbol":EMOJI[best_s],"hit_rate":rate,"confidence":0.12,"sample":total,
-              "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":"Fallback frequence"}
+              "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note}
         return pred, latest, pred["note"]
+
     applicable=[s for s in strategies if s["side"]=="player" and s["from_suit"]==latest.get("player_first_suit")]
     if not applicable:
         applicable=[s for s in strategies if s["side"]=="banker" and s["from_suit"]==latest.get("banker_first_suit")]
+
+    # Filtrer les stratégies en cooldown (sauf si aucune autre option)
+    free=[s for s in applicable if s["name"] not in banned]
+    if free:
+        applicable=free
+    elif applicable and recovery_hard:
+        # En mode hard on préfère vraiment éviter les strats qui viennent de perdre
+        pass  # on garde applicable mais on notera
+
     if not applicable:
         pf=Counter(h["player_first_suit"] for h in hands if h.get("player_first_suit"))
         if pf:
             best_s=pf.most_common(1)[0][0]; total=sum(pf.values()); rate=round(100*pf[best_s]/total,2)
+            note=f"Aucune transition pour {latest.get('player_first_suit')}"
+            if recovery_hard: note="⚠ RATTRAPAGE · "+note
             pred={"suit":best_s,"symbol":EMOJI[best_s],"hit_rate":rate,"confidence":0.1,"sample":total,
-                  "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,
-                  "note":f"Aucune transition pour {latest.get('player_first_suit')}"}
+                  "margin":round(rate-25,2),"strategy":"FREQ_PLAYER","strategy_id":None,"note":note}
             return pred, latest, pred["note"]
         return None, latest, "Rien d'applicable"
+
     def score(s):
         rate=s["real_rate"] if s["real_total"]>=MIN_VALIDATIONS else s["hist_rate"]
-        return (rate, s["confidence"], s["sample_size"], s["real_total"])
-    best=max(applicable, key=score)
+        # Légère pénalité si la strat est encore dans banned (cas de secours)
+        pen = -5 if s["name"] in banned else 0
+        return (rate + pen, s["confidence"], s["sample_size"], s["real_total"])
+
+    ranked=sorted(applicable, key=score, reverse=True)
+    best=ranked[0]
+
+    # Mode soft rattrapage : si 2+ pertes d'affilée et qu'il existe un 2e choix décent, on le prend
+    if recovery_soft and len(ranked)>=2:
+        second=ranked[1]
+        r1=best["real_rate"] if best["real_total"]>=MIN_VALIDATIONS else best["hist_rate"]
+        r2=second["real_rate"] if second["real_total"]>=MIN_VALIDATIONS else second["hist_rate"]
+        # On bascule si le 2e n'est pas trop loin (max 8 pts d'écart) → diversification
+        if r1 - r2 <= 8.0:
+            best=second
+
+    # Mode hard : après 3 pertes, on force la diversification si possible
+    if recovery_hard and len(ranked)>=2 and ranked[0]["name"]==best["name"]:
+        # Évite la strat qui était #1 si elle a participé aux pertes récentes
+        recent_losers={h["strategy"] for h in hist[:MAX_CONSEC_LOSS_HARD] if h["status"]=="INVALID"}
+        for cand in ranked:
+            if cand["name"] not in recent_losers:
+                best=cand
+                break
+
     rate=best["real_rate"] if best["real_total"]>=MIN_VALIDATIONS else best["hist_rate"]
     note=None
-    if latest.get("is_33"): note="⚠ 3-3 precedent: possible changement algo — vigilance"
-    elif latest.get("player_drew_3"): note="Joueur 3 cartes precedemment"
+    if recovery_hard:
+        note=f"⚠ RATTRAPAGE ({consec} pertes d'affilée) — strat alternative"
+    elif recovery_soft:
+        note=f"Rattrapage ({consec} pertes) — diversification"
+    elif best["name"] in banned:
+        note="Strat en cooldown évitée (perte récente)"
+    if latest.get("is_33"):
+        note=(note+" · " if note else "")+"⚠ 3-3 precedent: vigilance"
+    elif latest.get("player_drew_3"):
+        note=(note+" · " if note else "")+"Joueur 3 cartes precedemment"
     diag=(f"Score REEL {best['real_rate']}% ({best['real_hits']}/{best['real_total']})"
           if best["real_total"]>=MIN_VALIDATIONS else f"Score HISTO {best['hist_rate']}% (n={best['sample_size']})")
     note=f"{note} · {diag}" if note else diag
@@ -347,14 +517,36 @@ def run_learning_cycle(recheck=False):
     except Exception as e: print("patterns err", e)
     try: strategies=get_active_strategies()
     except Exception as e: print("active err", e)
+    player_ready=False
     try:
-        pred,latest,diag=pick_prediction(hands,strategies)
-        if pred and latest:
-            upsert_prediction(latest["n"]+1,pred,latest["n"],latest.get("player_first_suit"))
+        latest=hands[-1] if hands else None
+        # NE PREDIRE QUE si la main JOUEUR du dernier jeu est COMPLETE
+        # Règle : ▶ live + seulement 2 cartes P → attendre la 3e carte
+        # Prêt si: player_complete=1 en DB, ou 3 cartes P, ou #T présent
+        if latest:
+            n_p = latest.get("player_card_count") or 0
+            pc = latest.get("player_complete")
+            if pc is not None:
+                player_ready = bool(pc)
+            elif n_p >= 3 or latest.get("t_tag"):
+                player_ready = True
+            elif n_p >= 2:
+                # Anciennes lignes sans le flag : considérer prêt
+                player_ready = True
+            else:
+                player_ready = False
+        if latest and not player_ready:
+            pred=None
+            diag=f"⏳ Attente 3e carte JOUEUR #N{latest['n']} (▶ encore actif) — pred #N{latest['n']+1} en pause"
+        else:
+            pred,latest,diag=pick_prediction(hands,strategies)
+            if pred and latest:
+                upsert_prediction(latest["n"]+1,pred,latest["n"],latest.get("player_first_suit"))
     except Exception as e:
         print("pick err", e); diag=str(e)
     return {"validated":validated,"strategies_created":created,"deactivated":deactivated,
-            "active_count":len(strategies),"prediction":pred,"latest_n":latest["n"] if latest else None,"diagnosis":diag}
+            "active_count":len(strategies),"prediction":pred,"latest_n":latest["n"] if latest else None,
+            "diagnosis":diag,"player_ready":player_ready}
 
 def fetch_page(before=None):
     url=CHANNEL_WEB+(f"?before={before}" if before else "")
@@ -427,11 +619,17 @@ class Handler(BaseHTTPRequestHandler):
             n_valid=sum(1 for x in hist if x["status"]=="VALID")
             n_invalid=sum(1 for x in hist if x["status"]=="INVALID")
             n_pending=sum(1 for x in hist if x["status"]=="PENDING")
+            ready=bool(cycle.get("player_ready"))
+            # Ne publier la cible suivante que si P (joueur) est complet
+            target_n=(latest["n"]+1) if (latest and ready) else None
             self.send_json({"timestamp":datetime.now().isoformat(timespec="seconds"),"latest":latest,
-                "prediction":cycle.get("prediction"),"prediction_target_n":(latest["n"]+1) if latest else None,
+                "prediction":cycle.get("prediction") if ready else None,
+                "prediction_target_n":target_n,
+                "player_ready":ready,
                 "prediction_history":hist[:100],"patterns":get_patterns(15),"strategies_active":get_active_strategies(10),
                 "learning":{"validated_now":cycle.get("validated",0),"deactivated":cycle.get("deactivated",[]),
-                    "active_count":cycle.get("active_count",0),"diagnosis":cycle.get("diagnosis")},
+                    "active_count":cycle.get("active_count",0),"diagnosis":cycle.get("diagnosis"),
+                    "player_ready":ready},
                 "pred_stats":{"total":len(hist),"valid":n_valid,"invalid":n_invalid,"pending":n_pending}})
         elif path=="/api/predictions":
             validate_predictions(); self.send_json(get_prediction_history(int(qs.get("limit",[200])[0])))
@@ -645,7 +843,17 @@ if(x){tx('gn','#N'+x.n);document.getElementById('pc').innerHTML=(x.player_suits|
 document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—';
 tx('fmt',x.format||'?');const nP=(x.player_suits||'').split(',').filter(Boolean).length;const fmtEl=document.getElementById('fmt');if(fmtEl&&nP>=2)fmtEl.innerHTML=(x.format||(nP+'-?'))+' <span style="color:var(--ok)">· P1 OK</span>';const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none';
 if(x.is_33){const ls=document.getElementById('live-status');if(ls&&!ls.textContent.includes('3-3'))ls.textContent=(ls.textContent||'')+' · ⚠ dernier jeu 3-3'}}
-if(!l.prediction){tx('ps','—');tx('pn','En attente');tx('target','Cible —');tx('rate','—');tx('margin','—');tx('sample','—');tx('conf','—');const b0=document.getElementById('btn-copy-one');if(b0)b0.textContent='⧉ COPIER #N…';}if(l.prediction){const q=l.prediction;const p1n=(x&&x.player_suits)?x.player_suits.split(',').filter(Boolean).length:0;if(p1n>=2){const rs=document.getElementById('live-status');if(rs&&!String(rs.textContent).includes('P1 pret'))rs.textContent='P1 pret ('+p1n+' cartes) → pred #N'+(l.prediction_target_n||'?')+' emise';}tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
+if(!l.prediction){
+  const waiting=l.player_ready===false || (l.learning&&l.learning.player_ready===false);
+  tx('ps','—');tx('pn',waiting?'⏳ Attente 3e carte P':'En attente');
+  tx('target',waiting?(x?'#N'+x.n+' en cours':'—'):'Cible —');
+  tx('rate','—');tx('margin','—');tx('sample','—');tx('conf','—');
+  const b0=document.getElementById('btn-copy-one');if(b0)b0.textContent='⧉ COPIER #N…';
+  const pn0=document.getElementById('pnote');
+  if(waiting&&pn0){pn0.style.display='block';pn0.textContent='▶ Main joueur encore en cours — prediction du prochain jeu apres la 3e carte (ou fin 2-2)';}
+  else if(pn0){pn0.style.display='none';}
+  if(waiting){const rs=document.getElementById('live-status');if(rs)rs.textContent='⏳ #N'+(x?x.n:'?')+' P incomplete (▶) — pred en pause';}
+}if(l.prediction){const q=l.prediction;const p1n=(x&&x.player_suits)?x.player_suits.split(',').filter(Boolean).length:0;if(p1n>=2){const rs=document.getElementById('live-status');if(rs&&!String(rs.textContent).includes('P1 pret'))rs.textContent='P1 complet ('+p1n+' cartes) → pred #N'+(l.prediction_target_n||'?')+' emise';}tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
 tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');
 window._lastPredTxt='#N'+l.prediction_target_n+(q.symbol||sm[q.suit]||q.suit||'');
 const b1=document.getElementById('btn-copy-one');if(b1)b1.textContent='⧉ COPIER '+window._lastPredTxt;tx('rate',q.hit_rate+'%');
