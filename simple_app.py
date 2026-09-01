@@ -494,7 +494,7 @@ button.act.pri{background:linear-gradient(180deg,#6b1a2a,#4a1020);border-color:v
 </style></head><body><div class="shell">
 <header><div style="color:var(--gold-dim);letter-spacing:.25em">♠ ♥ ♣ ♦</div>
 <h1>XCODE SUIT CARD</h1>
-<div class="sub">Auto-apprenant · enseigne JOUEUR · bascule strategies</div></header>
+<div class="sub">Auto-apprenant · pred des P1 suffisant · cartes live · bascule strategies</div></header>
 
 <section class="panel gt"><div class="ph"><div><div class="ey">Telegram</div><div class="title">@statistika_baccara LIVE</div></div>
 <span class="pill" id="live-badge">OFF</span></div>
@@ -584,9 +584,9 @@ const [l,h,p,st,hands,stR]=await Promise.all([j('/api/live'),j('/api/predictions
 const x=l.latest;tx('clock',new Date().toLocaleTimeString());
 if(x){tx('gn','#N'+x.n);document.getElementById('pc').innerHTML=(x.player_suits||'').split(',').filter(Boolean).map((s,i)=>card('P'+(i+1),s)).join('')||'—';
 document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—';
-tx('fmt',x.format||'?');const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none';
+tx('fmt',x.format||'?');const nP=(x.player_suits||'').split(',').filter(Boolean).length;const fmtEl=document.getElementById('fmt');if(fmtEl&&nP>=2)fmtEl.innerHTML=(x.format||(nP+'-?'))+' <span style="color:var(--ok)">· P1 OK</span>';const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none';
 if(x.is_33){const ls=document.getElementById('live-status');if(ls&&!ls.textContent.includes('3-3'))ls.textContent=(ls.textContent||'')+' · ⚠ dernier jeu 3-3'}}
-if(l.prediction){const q=l.prediction;tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
+if(l.prediction){const q=l.prediction;const p1n=(x&&x.player_suits)?x.player_suits.split(',').filter(Boolean).length:0;if(p1n>=2){const rs=document.getElementById('live-status');if(rs&&!String(rs.textContent).includes('P1 pret'))rs.textContent='P1 pret ('+p1n+' cartes) → pred #N'+(l.prediction_target_n||'?')+' emise';}tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
 tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');
 window._lastPredTxt='#N'+l.prediction_target_n+(q.symbol||sm[q.suit]||q.suit||'');
 const b1=document.getElementById('btn-copy-one');if(b1)b1.textContent='⧉ COPIER '+window._lastPredTxt;tx('rate',q.hit_rate+'%');
