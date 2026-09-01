@@ -18,7 +18,7 @@ CHANNEL_WEB = "https://t.me/s/statistika_baccara"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 PORT = int(os.environ.get("PORT", 8000))
 AUTO_COLLECT_INTERVAL = 90
-MIN_SAMPLE, MIN_RATE, DEACTIVATE_RATE, MIN_VALIDATIONS = 20, 30.0, 22.0, 8
+MIN_SAMPLE, MIN_RATE, DEACTIVATE_RATE, MIN_VALIDATIONS = 12, 28.0, 20.0, 6
 SUITS = ["H", "D", "S", "C"]
 EMOJI = {"H": "♥", "D": "♦", "S": "♠", "C": "♣"}
 SUIT_NAME = {"H": "Coeur", "D": "Carreau", "S": "Pique", "C": "Trefle"}
@@ -50,7 +50,13 @@ def parse_message(text, msg_id=None):
 
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-    c=sqlite3.connect(DB_PATH); c.row_factory=sqlite3.Row; return c
+    c=sqlite3.connect(DB_PATH, timeout=60, check_same_thread=False)
+    c.row_factory=sqlite3.Row
+    try:
+        c.execute("PRAGMA busy_timeout=60000")
+    except Exception:
+        pass
+    return c
 
 def init_db():
     c=get_conn()
@@ -247,15 +253,18 @@ def pick_prediction(hands, strategies):
 
 def upsert_prediction(target_n, prediction, basis_n=None, basis_first_suit=None):
     if not prediction: return
-    c=get_conn()
-    c.execute("""INSERT INTO predictions (target_n,created_at,prediction_suit,strategy,strategy_id,confidence,hit_rate,margin,basis_n,basis_first_suit,note)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(target_n) DO UPDATE SET
-        prediction_suit=excluded.prediction_suit,strategy=excluded.strategy,strategy_id=excluded.strategy_id,
-        confidence=excluded.confidence,hit_rate=excluded.hit_rate,margin=excluded.margin,
-        basis_n=excluded.basis_n,basis_first_suit=excluded.basis_first_suit,note=excluded.note,created_at=excluded.created_at""",
-        (target_n,datetime.utcnow().isoformat(),prediction["suit"],prediction.get("strategy"),prediction.get("strategy_id"),
-         prediction.get("confidence",0),prediction.get("hit_rate",0),prediction.get("margin",0),basis_n,basis_first_suit,prediction.get("note")))
-    c.commit(); c.close()
+    try:
+        c=get_conn()
+        c.execute("""INSERT INTO predictions (target_n,created_at,prediction_suit,strategy,strategy_id,confidence,hit_rate,margin,basis_n,basis_first_suit,note)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(target_n) DO UPDATE SET
+            prediction_suit=excluded.prediction_suit,strategy=excluded.strategy,strategy_id=excluded.strategy_id,
+            confidence=excluded.confidence,hit_rate=excluded.hit_rate,margin=excluded.margin,
+            basis_n=excluded.basis_n,basis_first_suit=excluded.basis_first_suit,note=excluded.note,created_at=excluded.created_at""",
+            (target_n,datetime.utcnow().isoformat(),prediction["suit"],prediction.get("strategy"),prediction.get("strategy_id"),
+             prediction.get("confidence",0),prediction.get("hit_rate",0),prediction.get("margin",0),basis_n,basis_first_suit,prediction.get("note")))
+        c.commit(); c.close()
+    except Exception as e:
+        print("upsert_prediction error:", e)
 
 def validate_predictions(recheck_all=False):
     """
@@ -312,15 +321,25 @@ def get_patterns(limit=20):
 
 def run_learning_cycle(recheck=False):
     hands=get_all_hands()
-    validated=validate_predictions(recheck_all=recheck)
-    score_strategies_from_validations()
-    deactivated=prune_bad_strategies()
-    created=rebuild_strategies(hands)
-    record_patterns(hands)
-    strategies=get_active_strategies()
-    pred,latest,diag=pick_prediction(hands,strategies)
-    if pred and latest:
-        upsert_prediction(latest["n"]+1,pred,latest["n"],latest.get("player_first_suit"))
+    validated=0; created=0; deactivated=[]; strategies=[]; pred=None; latest=None; diag="—"
+    try: validated=validate_predictions(recheck_all=recheck)
+    except Exception as e: print("validate err", e)
+    try: score_strategies_from_validations()
+    except Exception as e: print("score err", e)
+    try: deactivated=prune_bad_strategies()
+    except Exception as e: print("prune err", e)
+    try: created=rebuild_strategies(hands)
+    except Exception as e: print("rebuild err", e)
+    try: record_patterns(hands)
+    except Exception as e: print("patterns err", e)
+    try: strategies=get_active_strategies()
+    except Exception as e: print("active err", e)
+    try:
+        pred,latest,diag=pick_prediction(hands,strategies)
+        if pred and latest:
+            upsert_prediction(latest["n"]+1,pred,latest["n"],latest.get("player_first_suit"))
+    except Exception as e:
+        print("pick err", e); diag=str(e)
     return {"validated":validated,"strategies_created":created,"deactivated":deactivated,
             "active_count":len(strategies),"prediction":pred,"latest_n":latest["n"] if latest else None,"diagnosis":diag}
 
@@ -565,20 +584,15 @@ else{b.textContent='DEMARRER LIVE';b.classList.add('off');g.textContent='OFF'}}
 function toggleLive(){if(liveOn){liveOn=false;if(liveTimer){clearInterval(liveTimer);liveTimer=null}setLiveUI(false);tx('live-status','LIVE arrete.');return}
 liveOn=true;setLiveUI(true);tx('live-status','LIVE…');runLiveTick();liveTimer=setInterval(runLiveTick,4000)}
 async function runLiveTick(){if(liveBusy)return;liveBusy=true;try{tx('live-status','Collecte + learn…');
-const d=await j('/api/collect?pages=3',{method:'POST'});await refreshAll();
-const L=d.learning||{};let m=d.status==='ok'?`+${d.hands_new||0} · ${L.active_count||0} actives`:'Err';
-if(L.deactivated&&L.deactivated.length)m+=' · '+L.deactivated.length+' coupees';tx('live-status',m)}
-catch(e){tx('live-status','Err '+e.message)}finally{liveBusy=false}}
-function fillLiveTable(hands,preds){const tb=document.getElementById('lt-body'),ct=document.getElementById('lt-count');
-if(!tb)return;const map={};(preds||[]).forEach(p=>map[p.target_n]=p);
-const rows=(hands||[]).slice().sort((a,b)=>b.n-a.n).slice(0,25);
-if(!rows.length){tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:12px">Vide</td></tr>';if(ct)ct.textContent='0';return}
-const latest=rows[0]&&rows[0].n;
-tb.innerHTML=rows.map(h=>{const pS=(h.player_suits||'').split(',').filter(Boolean),bS=(h.banker_suits||'').split(',').filter(Boolean);
-const fmt=h.format||(pS.length+'-'+bS.length);const pred=map[h.n];let st='—',cl='lt-pend',ps='—';
-if(pred){ps=sm[pred.prediction_suit]||pred.prediction_suit;if(pred.status==='VALID'){st='OK';cl='lt-ok'}else if(pred.status==='INVALID'){st='KO';cl='lt-ko'}else{st='…';cl='lt-pend'}}
-return `<tr class="${h.n===latest?'now':''}"><td class="lt-num">#N${h.n}</td><td>${pS.map(s=>sm[s]||s).join(' ')||'—'}</td><td>${bS.map(s=>sm[s]||s).join(' ')||'—'}</td><td>${fmt}</td><td>${ps}</td><td class="${cl}">${st}</td></tr>`}).join('');
-if(ct)ct.textContent=rows.length+' jeux'}
+const d=await j('/api/collect?pages=3',{method:'POST'});
+await refreshAll();
+if(d&&d.status==='error'){tx('live-status','Collecte: '+(d.error||'erreur'));}
+else{const L=(d&&d.learning)||{};let m='+'+(d&&d.hands_new!=null?d.hands_new:0)+' · '+(L.active_count||0)+' actives';
+if(L.deactivated&&L.deactivated.length)m+=' · '+L.deactivated.length+' coupees';
+if(d&&d.next_prediction)m+=' · pred '+(d.next_prediction.symbol||d.next_prediction.suit||'');
+tx('live-status',m);}}
+catch(e){tx('live-status','Err '+e.message);try{await refreshAll()}catch(e2){}}
+finally{liveBusy=false}}
 async function refreshAll(){try{
 const [l,h,p,st,hands,stR]=await Promise.all([j('/api/live'),j('/api/predictions?limit=200'),j('/api/patterns?limit=15'),j('/api/stats/overview'),j('/api/hands?limit=30'),j('/api/strategies')]);
 const x=l.latest;tx('clock',new Date().toLocaleTimeString());
@@ -586,7 +600,7 @@ if(x){tx('gn','#N'+x.n);document.getElementById('pc').innerHTML=(x.player_suits|
 document.getElementById('bc').innerHTML=(x.banker_suits||'').split(',').filter(Boolean).map((s,i)=>card('B'+(i+1),s)).join('')||'—';
 tx('fmt',x.format||'?');const nP=(x.player_suits||'').split(',').filter(Boolean).length;const fmtEl=document.getElementById('fmt');if(fmtEl&&nP>=2)fmtEl.innerHTML=(x.format||(nP+'-?'))+' <span style="color:var(--ok)">· P1 OK</span>';const al=document.getElementById('alert33');if(al)al.style.display=x.is_33?'block':'none';
 if(x.is_33){const ls=document.getElementById('live-status');if(ls&&!ls.textContent.includes('3-3'))ls.textContent=(ls.textContent||'')+' · ⚠ dernier jeu 3-3'}}
-if(l.prediction){const q=l.prediction;const p1n=(x&&x.player_suits)?x.player_suits.split(',').filter(Boolean).length:0;if(p1n>=2){const rs=document.getElementById('live-status');if(rs&&!String(rs.textContent).includes('P1 pret'))rs.textContent='P1 pret ('+p1n+' cartes) → pred #N'+(l.prediction_target_n||'?')+' emise';}tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
+if(!l.prediction){tx('ps','—');tx('pn','En attente');tx('target','Cible —');tx('rate','—');tx('margin','—');tx('sample','—');tx('conf','—');const b0=document.getElementById('btn-copy-one');if(b0)b0.textContent='⧉ COPIER #N…';}if(l.prediction){const q=l.prediction;const p1n=(x&&x.player_suits)?x.player_suits.split(',').filter(Boolean).length:0;if(p1n>=2){const rs=document.getElementById('live-status');if(rs&&!String(rs.textContent).includes('P1 pret'))rs.textContent='P1 pret ('+p1n+' cartes) → pred #N'+(l.prediction_target_n||'?')+' emise';}tx('ps',q.symbol);tx('pn',(q.symbol||'')+' — '+(sn[q.suit]||''));
 tx('target','Cible #N'+l.prediction_target_n);tx('strat',q.strategy||'AUTO');
 window._lastPredTxt='#N'+l.prediction_target_n+(q.symbol||sm[q.suit]||q.suit||'');
 const b1=document.getElementById('btn-copy-one');if(b1)b1.textContent='⧉ COPIER '+window._lastPredTxt;tx('rate',q.hit_rate+'%');
