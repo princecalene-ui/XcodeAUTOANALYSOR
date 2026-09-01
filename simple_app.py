@@ -12,6 +12,18 @@ from urllib.parse import urlparse, parse_qs
 import requests
 from bs4 import BeautifulSoup
 
+# --- Licence system ---
+try:
+    from license_system import (
+        ADMIN_SECRET, init_license_tables, create_batch,
+        activate_license, check_license, list_batches, get_batch_codes
+    )
+    HAS_LICENSE = True
+except ImportError:
+    HAS_LICENSE = False
+    ADMIN_SECRET = "XCODE-ADMIN-2026-CHANGE-ME"
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "baccarat.db")
 CHANNEL_WEB = "https://t.me/s/statistika_baccara"
