@@ -1125,13 +1125,23 @@ const sm={H:'♥',D:'♦',S:'♠',C:'♣'},sn={H:'Coeur',D:'Carreau',S:'Pique',C
 const red=s=>s==='H'||s==='D';
 const tx=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v??'—'};
 const card=(lab,s)=>`<div class="card ${red(s)?'red':''}"><strong>${lab}</strong><small>${sm[s]||s}</small></div>`;
+function getDeviceId(){
+  let id=localStorage.getItem('xcode_device_id');
+  if(id&&id.length>=12)return id;
+  const raw=[navigator.userAgent||'',screen.width+'x'+screen.height,Math.random().toString(36)].join('|');
+  let h=0;for(let i=0;i<raw.length;i++){h=((h<<5)-h)+raw.charCodeAt(i);h|=0;}
+  id='DEV'+Math.abs(h).toString(36).toUpperCase()+Date.now().toString(36).toUpperCase().slice(-6);
+  localStorage.setItem('xcode_device_id',id);return id;
+}
 async function j(u,o){
   const ctrl=new AbortController();
   const ms=(o&&o.timeout)||25000;
   const to=setTimeout(()=>ctrl.abort(),ms);
   try{
-    const r=await fetch(u,Object.assign({},o||{},{signal:ctrl.signal}));
+    const headers=Object.assign({'X-Device-Id':getDeviceId()},(o&&o.headers)||{});
+    const r=await fetch(u,Object.assign({},o||{},{signal:ctrl.signal,headers}));
     clearTimeout(to);
+    if(r.status===403){localStorage.removeItem('xcode_license');location.href='/';throw new Error('Licence expiree');}
     const txt=await r.text();
     try{return JSON.parse(txt)}catch(e){throw new Error('Reponse invalide HTTP '+r.status)}
   }catch(e){
@@ -1190,15 +1200,15 @@ tx('margin',(q.margin>=0?'+':'')+q.margin);tx('sample',q.sample);tx('conf',Math.
 const pn=document.getElementById('pnote');if(q.note){pn.style.display='block';pn.textContent=q.note}else{pn.style.display='none'}}
 const ps=l.pred_stats||{};tx('total',st.total_hands);tx('preds',ps.total||h.length);tx('valid',ps.valid||0);tx('invalid',ps.invalid||0);
 tx('sactive',st.strategies_active!=null?st.strategies_active:(stR.active||[]).length);
-document.getElementById('hist').innerHTML=h.map(x=>`<tr><td>#${x.target_n}</td><td><b>${sm[x.prediction_suit]||x.prediction_suit}</b></td>
+document.getElementById('hist').innerHTML=(Array.isArray(h)?h:[]).map(x=>`<tr><td>#${x.target_n}</td><td><b>${sm[x.prediction_suit]||x.prediction_suit}</b></td>
 <td>${x.strategy||'—'}</td><td>${x.hit_rate}%</td>
 <td><span class="status ${x.status==='VALID'?'valid':x.status==='INVALID'?'invalid':'pending'}">${x.status}</span></td>
 <td>${(x.actual_first_suit||'').split(',').filter(Boolean).map(s=>sm[s]||s).join(' ')||'—'}</td></tr>`).join('')||'<tr><td colspan="6">Vide</td></tr>';
-const allS=(stR.all||stR.active||[]);
+const allS=Array.isArray(stR.all)?stR.all:(Array.isArray(stR.active)?stR.active:[]);
 document.getElementById('strats').innerHTML=allS.slice(0,12).map(s=>{const rate=s.real_total>=8?s.real_rate:s.hist_rate;
 return `<div class="strat-item"><span class="${s.is_active?'':'off'}">${s.name}</span><span>${s.is_active?'✓ '+rate+'%':'✗ coupe'}</span></div>`}).join('')||'—';
-document.getElementById('patterns').innerHTML=p.map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">x${x.occurrences}</span></div>`).join('')||'—';
-fillLiveTable(hands,h);
+document.getElementById('patterns').innerHTML=(Array.isArray(p)?p:[]).map(x=>`<div class="pattern"><code>${x.pattern}</code><span class="count">x${x.occurrences}</span></div>`).join('')||'—';
+fillLiveTable(Array.isArray(hands)?hands:[], Array.isArray(h)?h:[]);
 if(l.learning&&l.learning.diagnosis)tx('out','Diag: '+l.learning.diagnosis);
 }catch(e){tx('out','Err '+e)}}
 async function collect(n){tx('out','Collecte…');try{const d=await j('/api/collect?pages='+n,{method:'POST'});document.getElementById('out').textContent=JSON.stringify(d,null,2);await refreshAll()}catch(e){tx('out','Err '+e)}}
