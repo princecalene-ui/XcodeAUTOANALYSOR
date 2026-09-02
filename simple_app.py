@@ -705,10 +705,15 @@ def validate_predictions(recheck_all=False):
             FROM predictions p JOIN hands h ON h.n=p.target_n
             WHERE p.status IN ('PENDING','VALID','INVALID')""").fetchall()
     else:
+        # Une prédiction déjà validée trop tôt doit aussi être récupérable si
+        # la main correspondante est encore incomplète (▶ + seulement 2 cartes).
+        # Cela garantit qu'aucun VERDICT ne reste définitivement INVALID avant
+        # la sortie de la 3e carte JOUEUR.
         rows=c.execute("""SELECT p.id,p.prediction_suit,h.player_first_suit,h.player_suits,
-                                  h.player_complete,h.player_card_count,h.format
+                                  h.player_complete,h.player_card_count,h.format,p.status
             FROM predictions p JOIN hands h ON h.n=p.target_n
-            WHERE p.status='PENDING'""").fetchall()
+            WHERE p.status='PENDING'
+               OR (h.player_complete=0 AND (h.player_card_count IS NULL OR h.player_card_count < 3))""").fetchall()
     n=0
     for r in rows:
         # Si le joueur est encore en phase de tirage (▶ + 2 cartes),
@@ -716,12 +721,13 @@ def validate_predictions(recheck_all=False):
         n_p = r["player_card_count"] or 0
         player_incomplete = (r["player_complete"] == 0)
         if player_incomplete:
-            # Répare aussi un éventuel ancien INVALID lors d'un recheck manuel.
-            if recheck_all:
-                c.execute(
-                    "UPDATE predictions SET status='PENDING',actual_first_suit=NULL,validated_at=NULL,note=? WHERE id=?",
-                    ("⏳ Attente de la 3e carte JOUEUR avant verdict", r["id"])
-                )
+            # Tant que ▶ indique que le joueur peut tirer une 3e carte et
+            # qu'il n'en a que 2, AUCUN verdict ne doit être prononcé.
+            # On remet également à PENDING tout ancien verdict prématuré.
+            c.execute(
+                "UPDATE predictions SET status='PENDING',actual_first_suit=NULL,validated_at=NULL,note=? WHERE id=?",
+                ("⏳ Attente de la 3e carte JOUEUR avant verdict", r["id"])
+            )
             continue
 
         suits=(r["player_suits"] or "").split(",")
