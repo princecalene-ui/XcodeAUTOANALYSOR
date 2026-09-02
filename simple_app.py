@@ -354,9 +354,30 @@ def get_all_hands():
     c=get_conn(); rows=c.execute("SELECT * FROM hands ORDER BY n ASC").fetchall(); c.close()
     return [dict(r) for r in rows]
 
+def get_latest_hand():
+    """Retourne la main réellement la plus récente (par message_id Telegram, puis collected_at).
+    Évite le blocage quand le canal remet les #N à zéro (nouveau shoe / reset)."""
+    c = get_conn()
+    row = c.execute("""
+        SELECT * FROM hands
+        ORDER BY
+            CASE WHEN message_id IS NOT NULL THEN message_id ELSE 0 END DESC,
+            collected_at DESC,
+            n DESC
+        LIMIT 1
+    """).fetchone()
+    c.close()
+    return dict(row) if row else None
+
 def get_recent_hands(limit=40):
     c=get_conn()
-    rows=c.execute("SELECT n,player_suits,banker_suits,player_first_suit,banker_first_suit,format,is_33,is_22,player_card_count,banker_card_count FROM hands ORDER BY n DESC LIMIT ?",(limit,)).fetchall()
+    # Affiche les plus récents par message_id (vrai ordre Telegram) plutôt que par n
+    rows=c.execute("""SELECT n,player_suits,banker_suits,player_first_suit,banker_first_suit,
+                             format,is_33,is_22,player_card_count,banker_card_count
+                      FROM hands
+                      ORDER BY CASE WHEN message_id IS NOT NULL THEN message_id ELSE 0 END DESC,
+                               collected_at DESC, n DESC
+                      LIMIT ?""",(limit,)).fetchall()
     c.close(); return [dict(r) for r in rows]
 
 def rebuild_strategies(hands):
@@ -542,7 +563,9 @@ def all_check_prev(suit, latest):
 
 def pick_prediction(hands, strategies):
     if not hands: return None, None, "Aucune main"
-    latest=hands[-1]
+    # Utilise la vraie dernière main (message_id Telegram) pour ne pas rester bloqué
+    # quand le canal remet les #N à zéro
+    latest = get_latest_hand() or hands[-1]
     hist=get_recent_pred_outcomes(12)
     consec=consecutive_losses(hist)
     banned=strategies_on_cooldown(hist, STREAK_COOLDOWN)
@@ -755,7 +778,7 @@ def run_learning_cycle(recheck=False):
     except Exception as e: print("active err", e)
     player_ready=False
     try:
-        latest=hands[-1] if hands else None
+        latest = get_latest_hand() if hands else None
         # NE PREDIRE QUE si la main JOUEUR du dernier jeu est COMPLETE
         # Règle : ▶ live + seulement 2 cartes P → attendre la 3e carte
         # Prêt si: player_complete=1 en DB, ou 3 cartes P, ou #T présent
@@ -888,7 +911,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path=="/api/analysis/full": self.send_json(analyze_report(get_all_hands()))
         elif path=="/api/strategies": self.send_json({"active":get_active_strategies(30),"all":get_all_strategies(40)})
         elif path=="/api/live":
-            cycle=run_learning_cycle(); hands=get_all_hands(); latest=hands[-1] if hands else None
+            cycle=run_learning_cycle(); latest=get_latest_hand()
             hist=get_prediction_history(200)
             n_valid=sum(1 for x in hist if x["status"]=="VALID")
             n_invalid=sum(1 for x in hist if x["status"]=="INVALID")
